@@ -23,12 +23,8 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-# Permanent named tabs — always shown first in the bot message, in this order
+# The three named tabs — these are the only sections shown in the bot message
 PERMANENT_TABS = ["Hannah", "Lucy", "Other"]
-
-# Month tab names in calendar order — used to sort month sections in the bot message
-MONTH_ORDER = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-               "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 
 
 class LarkClient:
@@ -242,12 +238,32 @@ class LarkClient:
         return raw_date
 
     @staticmethod
-    def _shipment_line(r) -> str:
-        """Format one shipment as:  tracking_num -- name -- date/status"""
-        tracking = r.get("tracking_num", "N/A")
+    def _section_for(r: dict) -> str:
+        """Determine which named section (Hannah / Lucy / Other) a shipment belongs to.
 
+        For rows from a named tab (Hannah / Lucy / Other), use the tab name directly.
+        For rows from a month tab (JAN / FEB / …), use the recipient field — the
+        recipient column records which named tab the order belongs to.
+        Falls back to 'Other' if nothing matches.
+        """
+        tab = r.get("tab", "").strip()
+        if tab in PERMANENT_TABS:
+            return tab
+
+        # Month-tab row — route by recipient name
+        recipient = r.get("recipient", "").strip().title()  # e.g. "Hannah", "Lucy", "Other"
+        if recipient in PERMANENT_TABS:
+            return recipient
+
+        return "Other"  # safe fallback
+
+    @staticmethod
+    def _shipment_line(r: dict) -> str:
+        """Format one shipment as:  tracking_num -- display_name -- status/date"""
+        tracking  = r.get("tracking_num", "N/A")
         recipient = r.get("recipient", "").strip()
         customer  = r.get("customer",  "").strip()
+
         if recipient.upper() == "BRENDAN":
             name = "Brendan"
         elif recipient.upper() == "CUSTOMER DIRECT":
@@ -277,40 +293,16 @@ class LarkClient:
     def send_daily_summary(self, all_results: list):
         """Send the daily summary card to the Lark group chat.
 
-        Message layout
-        --------------
-        📦 HLT Shipment Update  (card header)
+        The message always has exactly three sections:
+          **— Hannah —**
+          **— Lucy —**
+          **— Other —**
 
-        **HLT Shipment Tracker**
-
-        **— Hannah —**
-        *FEDEX*
-        1Z999AA10123456784 -- John Smith -- expected delivery on Fri, Feb 27 2026
-        ...
-
-        **— Lucy —**
-        *UPS*
-        ...
-
-        **— Other —**
-        *USPS*
-        ...
-
-        **— FEB —**
-        *FEDEX*
-        ...
-
-        **— JAN —**          ← only appears if there are undelivered layover items
-        *UPS*
-        ...
-
-        Rules:
-        - DELIVERED shipments are excluded.
-        - Duplicate tracking numbers are deduped (first occurrence wins).
-        - Named tabs (Hannah, Lucy, Other) always appear first.
-        - Month tabs appear after, sorted in calendar order (JAN … DEC).
-        - Empty sections are omitted entirely.
-        - Within each section shipments are grouped by carrier (alphabetical).
+        Every shipment (whether it came from a named tab or a month tab)
+        is routed into the correct section via _section_for().
+        Empty sections are omitted.
+        Within each section shipments are grouped by carrier (alphabetical).
+        Delivered shipments are excluded. Duplicates are deduped.
         """
         active = [r for r in all_results if r.get("new_status", "").upper() != "DELIVERED"]
 
@@ -326,16 +318,15 @@ class LarkClient:
                 seen.add(tn)
                 unique.append(r)
 
-        # Bucket results by tab name
-        buckets: dict[str, list] = {}
+        # Route every shipment into Hannah / Lucy / Other
+        buckets: dict[str, list] = {tab: [] for tab in PERMANENT_TABS}
         for r in unique:
-            tab = r.get("tab", "").strip()
-            buckets.setdefault(tab, []).append(r)
+            section = self._section_for(r)
+            buckets[section].append(r)
 
         lines = ["**HLT Shipment Tracker**"]
 
         def render_section(label: str, items: list):
-            """Append one labelled section, grouped by carrier, to lines."""
             if not items:
                 return
             lines.append(f"\n**— {label} —**")
@@ -348,18 +339,7 @@ class LarkClient:
                 for r in by_carrier[carrier]:
                     lines.append(self._shipment_line(r))
 
-        # 1. Named tabs first (Hannah, Lucy, Other)
         for tab_name in PERMANENT_TABS:
-            render_section(tab_name, buckets.get(tab_name, []))
-
-        # 2. Month tabs in calendar order (JAN … DEC), skipping empty ones
-        for month in MONTH_ORDER:
-            render_section(month, buckets.get(month, []))
-
-        # 3. Any unexpected tab names (safety net — shouldn't normally occur)
-        known = set(PERMANENT_TABS) | set(MONTH_ORDER)
-        for tab_name in sorted(buckets):
-            if tab_name not in known:
-                render_section(tab_name, buckets[tab_name])
+            render_section(tab_name, buckets[tab_name])
 
         self.send_group_message("\n".join(lines))
