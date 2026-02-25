@@ -219,73 +219,64 @@ class LarkClient:
         }
         return json.dumps(card)
 
-    def send_daily_summary(self, all_results: list, sheet_name: str = "HLT"):
-        """Send daily update grouped by carrier, matching the HLT format.
+    def send_daily_summary(self, all_results: list):
+        """Send daily update grouped by carrier.
 
-        Format:
+        Format (matching HLT style):
             HLT
 
             FEDEX
-            888598301681 (Lydon Borg Bonaci) - estimate 2/25 in CZ
+            888598301681 (Dominic Vassar) - estimate 2025-02-25
+            888637864897 (Joshua Taylor) - waiting to ship
 
-            ROYALMAIL - CALJEWELRY
-            RY480249909GB (Hannah) - needs to return the stuff
+            UPS
+            1ZV6988G0422008371 (Chris Leonardo) - in transit
+
+            ROYALMAIL
+            RY480249909GB (Hannah) - exception
         """
-        # Filter out delivered shipments
+        # Only show non-delivered shipments
         active = [r for r in all_results if r.get("new_status", "").upper() != "DELIVERED"]
 
         if not active:
             self.send_group_message("✅ All shipments delivered. Nothing to track today.")
             return
 
-        # Group by carrier, then by vendor within carrier
-        # Key: (carrier_display, vendor) -> list of rows
-        by_carrier_vendor = {}
+        # Group by carrier (uppercase)
+        by_carrier = {}
         for r in active:
-            carrier = r.get("carrier", "").strip().upper()
-            if not carrier:
-                carrier = "UNKNOWN"
-            vendor = r.get("vendor", "").strip().upper()
+            carrier = r.get("carrier", "").strip().upper() or "UNKNOWN"
+            by_carrier.setdefault(carrier, []).append(r)
 
-            # Build header: "CARRIER - VENDOR" if vendor present, else just "CARRIER"
-            if vendor:
-                header = f"{carrier} - {vendor}"
-            else:
-                header = carrier
+        lines = ["**HLT**"]
 
-            by_carrier_vendor.setdefault(header, []).append(r)
-
-        lines = [f"**HLT**\n"]
-
-        for header in sorted(by_carrier_vendor.keys()):
-            items = by_carrier_vendor[header]
-            lines.append(f"\n**{header}**")
+        for carrier in sorted(by_carrier.keys()):
+            items = by_carrier[carrier]
+            lines.append(f"\n**{carrier}**")
             for r in items:
                 tracking = r.get("tracking_num", "N/A")
-                name = r.get("recipient") or r.get("customer") or "Unknown"
-                status = r.get("new_status", "")
-                delivery = r.get("delivery_date", "")
-                raw = r.get("raw_status", "")
+                # Use Customer (col E) as the display name — that's who the package is for
+                name = r.get("customer", "").strip() or r.get("recipient", "").strip() or "Unknown"
+                status = r.get("new_status", "").upper()
+                delivery = r.get("delivery_date", "").strip()
+                raw = r.get("raw_status", "").strip()
 
-                # Build a human-readable status description
-                if status.upper() == "IN TRANSIT" and delivery:
+                # Human-readable status line
+                if status == "IN TRANSIT" and delivery:
                     desc = f"estimate {delivery}"
-                elif status.upper() == "OUT FOR DELIVERY":
-                    desc = "out for delivery"
-                elif status.upper() == "LABEL CREATED":
+                elif status == "IN TRANSIT":
+                    desc = "in transit"
+                elif status == "OUT FOR DELIVERY":
+                    desc = "out for delivery today"
+                elif status == "LABEL CREATED":
                     desc = "waiting to ship"
-                elif status.upper() == "DELIVERED":
-                    desc = f"delivered {delivery}" if delivery else "delivered"
-                elif status.upper() == "EXCEPTION":
-                    desc = f"exception - {raw}" if raw else "exception"
-                elif status.upper() == "NOT FOUND":
-                    desc = "not found / pre-shipment"
-                elif raw:
-                    desc = raw.lower()
+                elif status == "EXCEPTION":
+                    desc = f"exception — {raw}" if raw else "exception / check carrier"
+                elif status in ("UNKNOWN", "NOT FOUND", "PENDING", ""):
+                    desc = "pending / no update yet"
                 else:
-                    desc = status.lower() if status else "pending"
+                    desc = status.lower()
 
                 lines.append(f"{tracking} ({name}) - {desc}")
 
-        message = "\n".join(lines)
-        self.send_group_message(message)
+        self.send_group_message("\n".join(lines))
