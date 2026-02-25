@@ -1,13 +1,13 @@
 """
 Lark Shipment Tracking Bot — Main Entry Point
 
-Scans all tabs in each spreadsheet (except TEMPLATE):
+Scans the following tabs in each spreadsheet:
   - Hannah, Lucy, Other  — permanent named tabs, always scanned
-  - JAN, FEB, … DEC     — all month tabs are scanned so end-of-month
-                           layover from the previous month is never missed
+  - Current month tab    — e.g. FEB
+  - Previous month tab   — e.g. JAN  (catches end-of-month layover)
 
-Already-DELIVERED rows are skipped row-by-row, so scanning extra tabs
-is cheap and correct.
+DELIVERED rows are skipped individually, so layover shipments from the
+previous month that are still in transit will still appear.
 
 Usage:
     python main.py            # Run once
@@ -16,6 +16,7 @@ Usage:
 import sys
 import logging
 import time
+from datetime import datetime
 from config import SHEET_TOKENS, CARRIER_ALIASES
 from lark_client import LarkClient
 from carriers import CarrierTracker
@@ -26,14 +27,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# All recognised month-tab names (used to decide ordering in the bot message)
-MONTH_TAB_NAMES = {
-    "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-    "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
-}
+# Permanent named tabs — always scanned
+PERMANENT_TABS = {"Hannah", "Lucy", "Other"}
 
-# Permanent named tabs — always scanned, shown first in the bot message
-PERMANENT_TABS = ["Hannah", "Lucy", "Other"]
+# Month tab names in order — used to compute current + previous month
+MONTH_NAMES = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+               "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 
 # These statuses mean the carrier API gave us nothing real — don't write to sheet
 BAD_STATUSES = {"UNKNOWN", "NOT FOUND", ""}
@@ -47,14 +46,17 @@ def normalize_carrier(carrier_str: str) -> str:
     return CARRIER_ALIASES.get(carrier_str.lower().strip(), carrier_str.lower().strip())
 
 
+def tabs_to_scan() -> set:
+    """Return the set of tab titles to scan: named tabs + current + previous month."""
+    now = datetime.utcnow()
+    current = MONTH_NAMES[now.month - 1]          # e.g. "FEB"
+    previous = MONTH_NAMES[(now.month - 2) % 12]  # e.g. "JAN"  (wraps Dec→Nov)
+    return PERMANENT_TABS | {current, previous}
+
+
 def process_sheet(lark: LarkClient, tracker: CarrierTracker,
                   spreadsheet_token: str, dry_run: bool = False) -> list:
-    """Process every non-skipped tab in a spreadsheet.
-
-    Returns a list of result dicts for the daily summary.
-    Each dict includes a 'tab' key with the tab title so the bot message
-    can group entries under Hannah / Lucy / Other / JAN / FEB / etc.
-    """
+    """Process the relevant tabs in a spreadsheet and return result dicts."""
     all_results = []
 
     try:
@@ -63,15 +65,20 @@ def process_sheet(lark: LarkClient, tracker: CarrierTracker,
         logger.error(f"Failed to read spreadsheet {spreadsheet_token}: {e}")
         return all_results
 
-    if not tabs:
-        logger.warning(f"No processable tabs found in {spreadsheet_token}")
+    target_tabs = tabs_to_scan()
+    tabs_to_process = [t for t in tabs if t["title"] in target_tabs]
+
+    if not tabs_to_process:
+        logger.warning(f"No matching tabs found in {spreadsheet_token}. "
+                       f"Looking for: {sorted(target_tabs)}. "
+                       f"Available: {[t['title'] for t in tabs]}")
         return all_results
 
-    logger.info(f"Processing {len(tabs)} tabs in {spreadsheet_token}: {[t['title'] for t in tabs]}")
+    logger.info(f"Scanning tabs {[t['title'] for t in tabs_to_process]} in {spreadsheet_token}")
 
-    for tab in tabs:
+    for tab in tabs_to_process:
         tab_title = tab["title"]
-        sheet_id = tab["sheet_id"]
+        sheet_id  = tab["sheet_id"]
         logger.info(f"  Tab: {tab_title} ({sheet_id})")
 
         try:
@@ -80,14 +87,13 @@ def process_sheet(lark: LarkClient, tracker: CarrierTracker,
             logger.error(f"  Failed to read tab '{tab_title}': {e}")
             continue
 
-        logger.info(f"  {len(rows)} rows with tracking numbers in '{tab_title}'")
+        logger.info(f"  {len(rows)} rows with tracking in '{tab_title}'")
 
         for row in rows:
-            tracking_num = row["tracking_num"]
-            carrier_raw = row["carrier"]
+            tracking_num   = row["tracking_num"]
+            carrier_raw    = row["carrier"]
             current_status = row.get("current_status", "").strip().upper()
 
-            # Skip already-delivered shipments
             if current_status in DONE_STATUSES:
                 logger.info(f"  Skipping {tracking_num} — already DELIVERED")
                 continue
@@ -103,27 +109,24 @@ def process_sheet(lark: LarkClient, tracker: CarrierTracker,
                 })
                 continue
 
-            # Call carrier API
-            result = tracker.track(tracking_num, carrier)
-            new_status = result["status"]
+            result        = tracker.track(tracking_num, carrier)
+            new_status    = result["status"]
             delivery_date = result.get("delivery_date", "")
-            raw_status = result.get("raw_status", "")
-            api_error = result.get("error", "")
+            raw_status    = result.get("raw_status", "")
+            api_error     = result.get("error", "")
 
             if api_error or new_status.upper() in BAD_STATUSES:
-                # API failed — keep existing sheet status, show it in message
                 display_status = current_status if current_status else "PENDING"
                 logger.warning(f"  {tracking_num}: API error ({api_error[:60]}), keeping '{display_status}'")
                 all_results.append({
                     **row,
-                    "new_status": display_status,
+                    "new_status":    display_status,
                     "delivery_date": row.get("delivery_date", ""),
-                    "raw_status": raw_status,
-                    "tab": tab_title,
-                    "sheet_token": spreadsheet_token,
+                    "raw_status":    raw_status,
+                    "tab":           tab_title,
+                    "sheet_token":   spreadsheet_token,
                 })
             else:
-                # Good status — write to sheet if it changed
                 if not dry_run and new_status.upper() != current_status:
                     try:
                         lark.update_tracking_row(
@@ -136,11 +139,11 @@ def process_sheet(lark: LarkClient, tracker: CarrierTracker,
 
                 all_results.append({
                     **row,
-                    "new_status": new_status,
+                    "new_status":    new_status,
                     "delivery_date": delivery_date,
-                    "raw_status": raw_status,
-                    "tab": tab_title,
-                    "sheet_token": spreadsheet_token,
+                    "raw_status":    raw_status,
+                    "tab":           tab_title,
+                    "sheet_token":   spreadsheet_token,
                 })
 
             time.sleep(0.5)
@@ -157,7 +160,10 @@ def main():
         logger.error("No sheet tokens configured. Set LARK_SHEET_TOKENS env var.")
         sys.exit(1)
 
-    lark = LarkClient()
+    scanning = sorted(tabs_to_scan())
+    logger.info(f"Tabs to scan this run: {scanning}")
+
+    lark    = LarkClient()
     tracker = CarrierTracker()
     all_results = []
 
