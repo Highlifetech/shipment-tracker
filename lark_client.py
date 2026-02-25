@@ -219,6 +219,19 @@ class LarkClient:
         }
         return json.dumps(card)
 
+    @staticmethod
+    def _format_delivery_date(raw_date: str) -> str:
+        """Convert '2026-02-25' to 'expected delivery on Tuesday, February 25, 2026'."""
+        if not raw_date:
+            return ""
+        for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y"):
+            try:
+                dt = datetime.strptime(raw_date.strip()[:10], fmt)
+                return "expected delivery on " + dt.strftime("%A, %B %d, %Y").replace(" 0", " ")
+            except (ValueError, TypeError):
+                continue
+        return raw_date
+
     def send_daily_summary(self, all_results: list):
         """Send daily summary to Lark group chat.
 
@@ -281,7 +294,7 @@ class LarkClient:
                 elif status in ("UNKNOWN", "NOT FOUND", "PENDING", ""):
                     date_str = "pending"
                 elif delivery:
-                    date_str = delivery
+                    date_str = self._format_delivery_date(delivery)
                 else:
                     date_str = "in transit"
 
