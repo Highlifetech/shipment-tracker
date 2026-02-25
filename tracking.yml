@@ -1,0 +1,44 @@
+name: Shipment Tracking Bot
+
+on:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+jobs:
+  track-shipments:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tracking bot
+        env:
+          # Lark credentials
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          LARK_BASE_URL: ${{ secrets.LARK_BASE_URL }}
+          LARK_CHAT_ID: ${{ secrets.LARK_CHAT_ID }}
+          LARK_SHEET_TOKENS: ${{ secrets.LARK_SHEET_TOKENS }}
+
+          # Carrier API keys
+          FEDEX_API_KEY: ${{ secrets.FEDEX_API_KEY }}
+          FEDEX_SECRET_KEY: ${{ secrets.FEDEX_SECRET_KEY }}
+          UPS_CLIENT_ID: ${{ secrets.UPS_CLIENT_ID }}
+          UPS_CLIENT_SECRET: ${{ secrets.UPS_CLIENT_SECRET }}
+          USPS_CLIENT_ID: ${{ secrets.USPS_CLIENT_ID }}
+          USPS_CLIENT_SECRET: ${{ secrets.USPS_CLIENT_SECRET }}
+          DHL_API_KEY: ${{ secrets.DHL_API_KEY }}
+
+        run: python main.py
