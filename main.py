@@ -5,8 +5,8 @@ Reads tracking numbers from Lark Sheets, checks status via carrier APIs,
 updates the sheet, and sends a daily summary to a Lark group chat.
 
 Usage:
-    python main.py              # Run once (check all sheets)
-    python main.py --dry-run    # Run without writing to sheets or sending messages
+    python main.py           # Run once (check all sheets)
+    python main.py --dry-run # Run without writing to sheets or sending messages
 """
 import sys
 import logging
@@ -31,11 +31,10 @@ def normalize_carrier(carrier_str: str) -> str:
 def process_sheet(lark: LarkClient, tracker: CarrierTracker,
                   spreadsheet_token: str, dry_run: bool = False) -> list:
     """Process all tabs in a single spreadsheet.
-    
+
     Returns list of result dicts for the daily summary.
     """
     all_results = []
-
     try:
         tabs = lark.get_sheet_metadata(spreadsheet_token)
     except Exception as e:
@@ -56,28 +55,47 @@ def process_sheet(lark: LarkClient, tracker: CarrierTracker,
         for row in rows:
             tracking_num = row["tracking_num"]
             carrier_raw = row["carrier"]
-            carrier = normalize_carrier(carrier_raw)
+            current_status = row.get("current_status", "")
 
+            # Skip already-delivered shipments — no need to re-check
+            if current_status.upper() == "DELIVERED":
+                continue
+
+            carrier = normalize_carrier(carrier_raw)
             if not carrier or carrier not in CARRIER_ALIASES.values():
                 logger.warning(
                     f"Row {row['row_num']}: Unknown carrier '{carrier_raw}', skipping"
                 )
-                all_results.append({
-                    **row,
-                    "new_status": "UNKNOWN CARRIER",
-                    "tab": tab_title,
-                    "sheet_token": spreadsheet_token,
-                })
                 continue
 
-            # Check tracking status
+            # Check tracking status via carrier API
             result = tracker.track(tracking_num, carrier)
-
             new_status = result["status"]
             delivery_date = result.get("delivery_date", "")
             location = result.get("location", "")
 
-            # Update sheet (unless dry run)
+            # If API returned an error/unknown, fall back to the existing sheet status
+            # so we don't overwrite good data with "UNKNOWN"
+            if result.get("error") and new_status in ("UNKNOWN", ""):
+                new_status = current_status or "UNKNOWN"
+                logger.warning(
+                    f"Carrier API error for {tracking_num}, keeping status: {new_status}"
+                )
+                # Still include in results but mark as API error
+                all_results.append({
+                    **row,
+                    "new_status": new_status,
+                    "delivery_date": delivery_date or row.get("delivery_date", ""),
+                    "location": location,
+                    "raw_status": result.get("raw_status", ""),
+                    "tab": tab_title,
+                    "sheet_token": spreadsheet_token,
+                    "api_error": result.get("error", ""),
+                })
+                time.sleep(0.3)
+                continue
+
+            # Update sheet (unless dry run or status unchanged)
             if not dry_run:
                 try:
                     lark.update_tracking_row(
@@ -107,7 +125,6 @@ def process_sheet(lark: LarkClient, tracker: CarrierTracker,
 
 def main():
     dry_run = "--dry-run" in sys.argv
-
     if dry_run:
         logger.info("=== DRY RUN MODE — no writes or messages ===")
 
@@ -117,7 +134,6 @@ def main():
 
     lark = LarkClient()
     tracker = CarrierTracker()
-
     all_results = []
 
     for token in SHEET_TOKENS:
@@ -136,12 +152,11 @@ def main():
             logger.error(f"Failed to send daily summary: {e}")
     else:
         logger.info("Dry run — skipping group chat message")
-        # Print summary to console instead
         for r in all_results:
             logger.info(
                 f"  {r['tracking_num']} | {r['carrier']} | "
                 f"{r['new_status']} | {r.get('delivery_date', '')} | "
-                f"{r.get('customer', '')}"
+                f"{r.get('recipient', r.get('customer', ''))}"
             )
 
     logger.info("Done!")
