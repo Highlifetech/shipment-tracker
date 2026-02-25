@@ -1,6 +1,6 @@
 """
 Carrier Tracking API Clients
-Direct integration with FedEx, UPS, USPS, and DHL free APIs.
+Direct integration with FedEx, UPS, USPS, DHL, and Royal Mail free APIs.
 Each carrier returns a normalized status dict.
 """
 import logging
@@ -10,7 +10,8 @@ from config import (
     FEDEX_API_KEY, FEDEX_SECRET_KEY,
     UPS_CLIENT_ID, UPS_CLIENT_SECRET,
     USPS_CLIENT_ID, USPS_CLIENT_SECRET,
-    DHL_API_KEY, STATUS_MAP,
+    DHL_API_KEY, ROYALMAIL_API_KEY,
+    STATUS_MAP,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,7 +145,6 @@ class UPSTracker:
         resp.raise_for_status()
         data = resp.json()
         self.token = data["access_token"]
-        # UPS may return expires_in as a string — use safe converter
         self.token_expires = time.time() + _safe_expires(data, "expires_in", 14400) - 300
         return self.token
 
@@ -293,7 +293,6 @@ class DHLTracker:
             )
             resp.raise_for_status()
             data = resp.json()
-
             shipments = data.get("shipments", [])
             if not shipments:
                 return normalize_result("not_found")
@@ -307,8 +306,7 @@ class DHLTracker:
                         .get("addressLocality", ""))
             status_map = {
                 "delivered": "delivered", "transit": "in_transit",
-                "failure": "exception", "pre-transit": "label_created",
-                "unknown": "unknown",
+                "failure": "exception", "pre-transit": "label_created", "unknown": "unknown",
             }
             status = status_map.get(status_code, "in_transit")
             delivery_date = ""
@@ -331,6 +329,95 @@ class DHLTracker:
 
 
 # =============================================================================
+# Royal Mail Tracking API
+# https://developer.royalmail.net/api/tracking
+# Uses the Royal Mail Tracking API v2 (free tier available)
+# =============================================================================
+
+class RoyalMailTracker:
+    """Royal Mail Tracking API v2."""
+    TRACK_URL = "https://api.royalmail.net/tracking/v2/events"
+
+    def track(self, tracking_number: str) -> dict:
+        try:
+            if not ROYALMAIL_API_KEY:
+                raise Exception("Royal Mail API key not configured")
+            headers = {
+                "x-ibm-client-id": ROYALMAIL_API_KEY,
+                "Accept": "application/json",
+            }
+            resp = requests.get(
+                self.TRACK_URL,
+                headers=headers,
+                params={"trackingNumber": tracking_number},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            # Royal Mail response structure
+            mail_pieces = data.get("mailPieces", [])
+            if not mail_pieces:
+                return normalize_result("not_found")
+
+            piece = mail_pieces[0]
+            events = piece.get("events", [])
+            summary = piece.get("summary", {})
+
+            # Use summary status if available
+            status_desc = summary.get("statusDescription", "").lower()
+            event_code = summary.get("statusCategory", "").upper()
+            raw_status = summary.get("statusDescription", "")
+
+            # Get latest event location
+            location = ""
+            if events:
+                latest = events[0]
+                loc = latest.get("locationName", "")
+                location = loc
+
+            # Map Royal Mail status
+            if "delivered" in status_desc:
+                status = "delivered"
+            elif "out for delivery" in status_desc or "with delivery" in status_desc:
+                status = "out_for_delivery"
+            elif "collected" in status_desc or "accepted" in status_desc:
+                status = "in_transit"
+            elif "in transit" in status_desc or "transit" in status_desc:
+                status = "in_transit"
+            elif "arrived" in status_desc:
+                status = "in_transit"
+            elif "exception" in status_desc or "returned" in status_desc or "failed" in status_desc:
+                status = "exception"
+            elif "posted" in status_desc or "dispatched" in status_desc:
+                status = "label_created"
+            else:
+                status = "in_transit"
+
+            # Delivery date
+            delivery_date = ""
+            if status == "delivered" and events:
+                ts = events[0].get("eventDateTime", "")
+                if ts:
+                    delivery_date = ts[:10]
+            estimated = summary.get("estimatedDeliveryDate", {})
+            if estimated and not delivery_date:
+                start = estimated.get("startOfEstimatedWindow", "")
+                if start:
+                    delivery_date = start[:10]
+
+            return normalize_result(status, delivery_date, location, raw_status)
+        except requests.exceptions.HTTPError as e:
+            if e.response and e.response.status_code == 404:
+                return normalize_result("not_found")
+            logger.error(f"Royal Mail tracking error for {tracking_number}: {e}")
+            return normalize_result("unknown", error=str(e))
+        except Exception as e:
+            logger.error(f"Royal Mail tracking error for {tracking_number}: {e}")
+            return normalize_result("unknown", error=str(e))
+
+
+# =============================================================================
 # Unified Tracker
 # =============================================================================
 
@@ -342,11 +429,13 @@ class CarrierTracker:
         self.ups = UPSTracker()
         self.usps = USPSTracker()
         self.dhl = DHLTracker()
+        self.royalmail = RoyalMailTracker()
         self._clients = {
             "fedex": self.fedex,
             "ups": self.ups,
             "usps": self.usps,
             "dhl": self.dhl,
+            "royalmail": self.royalmail,
         }
 
     def track(self, tracking_number: str, carrier: str) -> dict:
