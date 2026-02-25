@@ -1,15 +1,21 @@
 """
 Carrier Tracking Clients
-Uses free public tracking endpoints - no API accounts required for FedEx/Royal Mail/USPS.
-UPS uses the UPS Tracking API (existing credentials).
+
+Uses the official FedEx Track API (requires credentials).
+Uses free public tracking endpoints for USPS/Royal Mail.
+UPS and DHL use their respective APIs (existing credentials).
 Each carrier returns a normalized status dict.
 """
+
 import logging
 import time
 import re
 import json
 import requests
+
 from config import (
+    FEDEX_API_KEY,
+    FEDEX_SECRET_KEY,
     UPS_CLIENT_ID,
     UPS_CLIENT_SECRET,
     DHL_API_KEY,
@@ -29,8 +35,9 @@ HEADERS = {
 }
 
 
-def normalize_result(status: str, delivery_date: str = "", location: str = "",
-                     raw_status: str = "", error: str = "") -> dict:
+def normalize_result(status: str, delivery_date: str = "",
+                     location: str = "", raw_status: str = "",
+                     error: str = "") -> dict:
     """Return a standardized tracking result."""
     return {
         "status": STATUS_MAP.get(status, STATUS_MAP["unknown"]),
@@ -42,7 +49,8 @@ def normalize_result(status: str, delivery_date: str = "", location: str = "",
     }
 
 
-def _safe_expires(data: dict, key: str = "expires_in", default: int = 3600) -> int:
+def _safe_expires(data: dict, key: str = "expires_in",
+                  default: int = 3600) -> int:
     """Safely extract token expiry as an integer."""
     val = data.get(key, default)
     try:
@@ -52,60 +60,73 @@ def _safe_expires(data: dict, key: str = "expires_in", default: int = 3600) -> i
 
 
 # =============================================================================
-# FedEx - Scrapes the public FedEx tracking API (no account needed)
+# FedEx Track API v1
+# https://developer.fedex.com/api/en-us/catalog/track/v1/docs.html
 # =============================================================================
-class FedExTracker:
-    """Scrapes the FedEx public tracking endpoint."""
 
-    TRACK_URL = "https://www.fedex.com/trackingCal/track"
+class FedExTracker:
+    """FedEx Track API v1 (official credentials)."""
+
+    TOKEN_URL = "https://apis.fedex.com/oauth/token"
+    TRACK_URL = "https://apis.fedex.com/track/v1/trackingnumbers"
+
+    def __init__(self):
+        self.token = None
+        self.token_expires = 0
+
+    def _authenticate(self):
+        if self.token and time.time() < self.token_expires:
+            return self.token
+        if not FEDEX_API_KEY or not FEDEX_SECRET_KEY:
+            raise Exception("FedEx API credentials not configured")
+        resp = requests.post(self.TOKEN_URL, data={
+            "grant_type": "client_credentials",
+            "client_id": FEDEX_API_KEY,
+            "client_secret": FEDEX_SECRET_KEY,
+        }, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        self.token = data["access_token"]
+        self.token_expires = time.time() + _safe_expires(data) - 300
+        return self.token
 
     def track(self, tracking_number: str) -> dict:
         try:
-            payload = {
-                "data": json.dumps({
-                    "TrackPackagesRequest": {
-                        "appType": "WTRK",
-                        "appDeviceType": "DESKTOP",
-                        "uniqueKey": "",
-                        "processingParameters": {},
-                        "trackingInfoList": [
-                            {
-                                "trackNumberInfo": {
-                                    "trackingNumber": tracking_number,
-                                    "trackingQualifier": "",
-                                    "trackingCarrier": "",
-                                }
-                            }
-                        ],
-                    }
-                }),
-                "action": "trackpackages",
-                "locale": "en_US",
-                "version": "1",
-                "format": "json",
-            }
+            token = self._authenticate()
             headers = {
-                **HEADERS,
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Origin": "https://www.fedex.com",
-                "Referer": f"https://www.fedex.com/fedextrack/?trknbr={tracking_number}",
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
             }
-            resp = requests.post(self.TRACK_URL, data=payload, headers=headers, timeout=30)
+            body = {
+                "trackingInfo": [
+                    {"trackingNumberInfo": {"trackingNumber": tracking_number}}
+                ],
+                "includeDetailedScans": False,
+            }
+            resp = requests.post(self.TRACK_URL, headers=headers,
+                                 json=body, timeout=30)
             resp.raise_for_status()
             data = resp.json()
 
-            pkg_list = (data.get("TrackPackagesResponse", {})
-                           .get("packageList", []))
-            if not pkg_list:
-                return normalize_result("not_found")
+            results = (data.get("output", {})
+                       .get("completeTrackResults", [{}])[0]
+                       .get("trackResults", [{}])[0])
 
-            pkg = pkg_list[0]
-            key_status = pkg.get("keyStatus", "").upper()
-            if key_status in ("NOTFOUND", "NOT_FOUND", "ERROR"):
-                return normalize_result("not_found")
+            if results.get("error"):
+                return normalize_result(
+                    "not_found",
+                    error=results["error"].get("message", ""))
 
-            raw_status = pkg.get("displayStatus", "") or pkg.get("statusCD", "")
-            status_cd = (pkg.get("statusCD", "") or "").upper()
+            latest = results.get("latestStatusDetail", {})
+            status_code = latest.get("code", "").upper()
+            raw_status = latest.get("description", "")
+
+            location_info = latest.get("scanLocation", {})
+            location = ", ".join(filter(None, [
+                location_info.get("city"),
+                location_info.get("stateOrProvinceCode"),
+                location_info.get("countryCode"),
+            ]))
 
             status_map = {
                 "DL": "delivered",
@@ -114,41 +135,28 @@ class FedExTracker:
                 "DE": "exception",
                 "PU": "in_transit",
                 "PL": "label_created",
-                "OC": "label_created",
-                "AR": "in_transit",
-                "DP": "in_transit",
             }
-            status = status_map.get(status_cd, "in_transit")
+            status = status_map.get(status_code, "in_transit")
 
             delivery_date = ""
-            est_del = pkg.get("estDeliveryDt", "") or pkg.get("actDeliveryDt", "")
-            if est_del:
-                try:
-                    from datetime import datetime
-                    for fmt in ("%b %d, %Y", "%Y-%m-%d", "%m/%d/%Y"):
-                        try:
-                            delivery_date = datetime.strptime(est_del.strip(), fmt).strftime("%Y-%m-%d")
-                            break
-                        except ValueError:
-                            continue
-                except Exception:
-                    delivery_date = est_del[:10]
+            for d in results.get("dateAndTimes", []):
+                if d.get("type") in ("ACTUAL_DELIVERY",
+                                     "ESTIMATED_DELIVERY"):
+                    delivery_date = d.get("dateTime", "")[:10]
+                    break
 
-            city = pkg.get("actLocCity", "") or pkg.get("destCity", "")
-            state = pkg.get("actLocStatCD", "") or pkg.get("destStateCD", "")
-            country = pkg.get("actLocCntryCD", "") or pkg.get("destCntryCD", "")
-            location = ", ".join(filter(None, [city, state, country]))
-
-            return normalize_result(status, delivery_date, location, raw_status)
+            return normalize_result(status, delivery_date,
+                                    location, raw_status)
 
         except Exception as e:
-            logger.error(f"FedEx tracking error for {tracking_number}: {e}")
+            logger.error(
+                f"FedEx tracking error for {tracking_number}: {e}")
             return normalize_result("unknown", error=str(e))
-
 
 # =============================================================================
 # UPS Tracking API (existing credentials - kept as-is since it works)
 # =============================================================================
+
 class UPSTracker:
     """UPS Tracking API v1."""
 
@@ -198,6 +206,7 @@ class UPSTracker:
             shipment = track_resp.get("shipment", [{}])[0]
             package = shipment.get("package", [{}])[0]
             activity = package.get("activity", [])
+
             if not activity:
                 return normalize_result("not_found")
 
@@ -205,6 +214,7 @@ class UPSTracker:
             status_obj = latest.get("status", {})
             status_type = status_obj.get("type", "").upper()
             raw_status = status_obj.get("description", "")
+
             location_obj = latest.get("location", {}).get("address", {})
             location = ", ".join(filter(None, [
                 location_obj.get("city"),
@@ -229,6 +239,7 @@ class UPSTracker:
                 date_str = str(d.get("date", ""))
                 if date_str and len(date_str) == 8:
                     delivery_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+
             if status == "delivered" and not delivery_date:
                 date_str = str(latest.get("date", ""))
                 if date_str and len(date_str) == 8:
@@ -240,10 +251,10 @@ class UPSTracker:
             logger.error(f"UPS tracking error for {tracking_number}: {e}")
             return normalize_result("unknown", error=str(e))
 
-
 # =============================================================================
 # USPS - Scrapes the public USPS tracking page (no API key needed)
 # =============================================================================
+
 class USPSTracker:
     """Scrapes the USPS public tracking page."""
 
@@ -275,7 +286,9 @@ class USPSTracker:
                 if date_match:
                     try:
                         from datetime import datetime
-                        delivery_date = datetime.strptime(date_match.group(0), "%B %d, %Y").strftime("%Y-%m-%d")
+                        delivery_date = datetime.strptime(
+                            date_match.group(0), "%B %d, %Y"
+                        ).strftime("%Y-%m-%d")
                     except Exception:
                         pass
             elif re.search(r'Out for Delivery', html, re.IGNORECASE):
@@ -301,10 +314,10 @@ class USPSTracker:
             logger.error(f"USPS tracking error for {tracking_number}: {e}")
             return normalize_result("unknown", error=str(e))
 
-
 # =============================================================================
 # DHL Tracking API (existing - kept as-is)
 # =============================================================================
+
 class DHLTracker:
     """DHL Unified Tracking API."""
 
@@ -322,6 +335,7 @@ class DHLTracker:
             )
             resp.raise_for_status()
             data = resp.json()
+
             shipments = data.get("shipments", [])
             if not shipments:
                 return normalize_result("not_found")
@@ -330,9 +344,10 @@ class DHLTracker:
             status_obj = shipment.get("status", {})
             status_code = status_obj.get("statusCode", "").lower()
             raw_status = status_obj.get("description", "")
+
             location = (status_obj.get("location", {})
-                                  .get("address", {})
-                                  .get("addressLocality", ""))
+                        .get("address", {})
+                        .get("addressLocality", ""))
 
             status_map = {
                 "delivered": "delivered",
@@ -363,10 +378,10 @@ class DHLTracker:
             logger.error(f"DHL tracking error for {tracking_number}: {e}")
             return normalize_result("unknown", error=str(e))
 
-
 # =============================================================================
 # Royal Mail - Uses public Royal Mail tracking API (no API key needed)
 # =============================================================================
+
 class RoyalMailTracker:
     """Uses the Royal Mail public tracking endpoint."""
 
@@ -413,6 +428,7 @@ class RoyalMailTracker:
                     ts = events[0].get("eventDateTime", "")
                     if ts:
                         delivery_date = ts[:10]
+
                 estimated = summary.get("estimatedDeliveryDate", {})
                 if estimated and not delivery_date:
                     start = estimated.get("startOfEstimatedWindow", "")
@@ -452,6 +468,7 @@ class RoyalMailTracker:
 # =============================================================================
 # Unified Tracker
 # =============================================================================
+
 class CarrierTracker:
     """Routes tracking requests to the correct carrier."""
 
