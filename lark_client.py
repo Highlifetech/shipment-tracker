@@ -57,13 +57,10 @@ class LarkClient:
 
     def get_sheet_metadata(self, spreadsheet_token: str) -> list:
         """Get all sheet tabs (name, id) in a spreadsheet.
-
         Tries v3 first, falls back to v2 if that fails.
         """
-        # Try v3 API first
         url_v3 = f"{self.base_url}/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query"
         resp = requests.get(url_v3, headers=self._headers(), timeout=30)
-
         if resp.ok:
             data = resp.json()
             if data.get("code") == 0:
@@ -74,10 +71,8 @@ class LarkClient:
         else:
             logger.error(f"v3 HTTP {resp.status_code} token={spreadsheet_token} body={resp.text[:200]}")
 
-        # Fall back to v2 API
         url_v2 = f"{self.base_url}/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/metainfo"
         resp2 = requests.get(url_v2, headers=self._headers(), timeout=30)
-
         if resp2.ok:
             data2 = resp2.json()
             if data2.get("code") == 0:
@@ -217,35 +212,80 @@ class LarkClient:
         card = {
             "config": {"wide_screen_mode": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "📦 Shipment Tracking Update"},
+                "title": {"tag": "plain_text", "content": "📦 HLT Shipment Update"},
                 "template": "blue",
             },
             "elements": [{"tag": "markdown", "content": text_content}],
         }
         return json.dumps(card)
 
-    def send_daily_summary(self, all_results: list):
-        """Send daily update grouped by carrier for all non-delivered shipments."""
-        active = [r for r in all_results
-                  if r.get("new_status", "").upper() != "DELIVERED"]
+    def send_daily_summary(self, all_results: list, sheet_name: str = "HLT"):
+        """Send daily update grouped by carrier, matching the HLT format.
+
+        Format:
+            HLT
+
+            FEDEX
+            888598301681 (Lydon Borg Bonaci) - estimate 2/25 in CZ
+
+            ROYALMAIL - CALJEWELRY
+            RY480249909GB (Hannah) - needs to return the stuff
+        """
+        # Filter out delivered shipments
+        active = [r for r in all_results if r.get("new_status", "").upper() != "DELIVERED"]
+
         if not active:
-            self.send_group_message(
-                "✅ All shipments have been delivered. Nothing to track today."
-            )
+            self.send_group_message("✅ All shipments delivered. Nothing to track today.")
             return
-        by_carrier = {}
+
+        # Group by carrier, then by vendor within carrier
+        # Key: (carrier_display, vendor) -> list of rows
+        by_carrier_vendor = {}
         for r in active:
-            carrier = r.get("carrier", "Unknown").strip().upper()
-            by_carrier.setdefault(carrier, []).append(r)
-        lines = [f"**📦 Daily Shipment Update** — {len(active)} active shipment(s)\n"]
-        for carrier in sorted(by_carrier.keys()):
-            items = by_carrier[carrier]
-            lines.append(f"\n**{carrier}** ({len(items)})")
+            carrier = r.get("carrier", "").strip().upper()
+            if not carrier:
+                carrier = "UNKNOWN"
+            vendor = r.get("vendor", "").strip().upper()
+
+            # Build header: "CARRIER - VENDOR" if vendor present, else just "CARRIER"
+            if vendor:
+                header = f"{carrier} - {vendor}"
+            else:
+                header = carrier
+
+            by_carrier_vendor.setdefault(header, []).append(r)
+
+        lines = [f"**HLT**\n"]
+
+        for header in sorted(by_carrier_vendor.keys()):
+            items = by_carrier_vendor[header]
+            lines.append(f"\n**{header}**")
             for r in items:
                 tracking = r.get("tracking_num", "N/A")
                 name = r.get("recipient") or r.get("customer") or "Unknown"
-                status = r.get("new_status", "UNKNOWN")
+                status = r.get("new_status", "")
                 delivery = r.get("delivery_date", "")
-                status_info = f"{status} — Est. {delivery}" if delivery else status
-                lines.append(f"  • {tracking} | {name} | {status_info}")
-        self.send_group_message("\n".join(lines))
+                raw = r.get("raw_status", "")
+
+                # Build a human-readable status description
+                if status.upper() == "IN TRANSIT" and delivery:
+                    desc = f"estimate {delivery}"
+                elif status.upper() == "OUT FOR DELIVERY":
+                    desc = "out for delivery"
+                elif status.upper() == "LABEL CREATED":
+                    desc = "waiting to ship"
+                elif status.upper() == "DELIVERED":
+                    desc = f"delivered {delivery}" if delivery else "delivered"
+                elif status.upper() == "EXCEPTION":
+                    desc = f"exception - {raw}" if raw else "exception"
+                elif status.upper() == "NOT FOUND":
+                    desc = "not found / pre-shipment"
+                elif raw:
+                    desc = raw.lower()
+                else:
+                    desc = status.lower() if status else "pending"
+
+                lines.append(f"{tracking} ({name}) - {desc}")
+
+        message = "\n".join(lines)
+        self.send_group_message(message)
