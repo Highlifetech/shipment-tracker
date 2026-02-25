@@ -60,6 +60,8 @@ class LarkClient:
         """Get all sheet tabs (name, id) in a spreadsheet."""
         url = f"{self.base_url}/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query"
         resp = requests.get(url, headers=self._headers(), timeout=30)
+        if not resp.ok:
+            logger.error(f"Sheet metadata HTTP {resp.status_code}: {resp.text}")
         resp.raise_for_status()
         data = resp.json()
 
