@@ -1,19 +1,31 @@
 """
 Lark API Client
-Handles authentication, reading/writing Lark Sheets, and sending group chat messages.
+
+Handles authentication, reading/writing Lark Sheets,
+and sending group chat messages.
 Uses JP-region endpoints for Lark Suite.
 """
 import json
 import logging
 from datetime import datetime
 import time
+
 import requests
+
 from config import (
-    LARK_APP_ID, LARK_APP_SECRET, LARK_BASE_URL,
-    LARK_CHAT_ID, COLUMNS, HEADER_ROW, SKIP_TABS,
+    LARK_APP_ID,
+    LARK_APP_SECRET,
+    LARK_BASE_URL,
+    LARK_CHAT_ID,
+    COLUMNS,
+    HEADER_ROW,
+    SKIP_TABS,
 )
 
 logger = logging.getLogger(__name__)
+
+# The permanent named tabs (always shown as sections in the bot message)
+PERMANENT_TABS = ["Hannah", "Lucy", "Other"]
 
 
 class LarkClient:
@@ -32,6 +44,7 @@ class LarkClient:
         """Get or refresh tenant access token."""
         if self.token and time.time() < self.token_expires:
             return self.token
+
         url = f"{self.base_url}/open-apis/auth/v3/tenant_access_token/internal"
         resp = requests.post(url, json={
             "app_id": LARK_APP_ID,
@@ -122,17 +135,19 @@ class LarkClient:
             start_col="A", end_col="Q",
             start_row=start_row, end_row=500,
         )
+
         col_idx = {
-            "shipment_id": 0,    # A
-            "vendor": 1,         # B
-            "recipient": 2,      # C
-            "order_num": 3,      # D
-            "customer": 4,       # E
-            "tracking_num": 6,   # G
-            "carrier": 7,        # H
-            "status": 12,        # M
-            "delivery_date": 16, # Q
+            "shipment_id":   0,   # A
+            "vendor":        1,   # B
+            "recipient":     2,   # C
+            "order_num":     3,   # D
+            "customer":      4,   # E
+            "tracking_num":  6,   # G
+            "carrier":       7,   # H
+            "status":        12,  # M
+            "delivery_date": 16,  # Q
         }
+
         results = []
         for i, row in enumerate(rows):
             while len(row) < 17:
@@ -141,16 +156,16 @@ class LarkClient:
             if not tracking:
                 continue
             results.append({
-                "row_num": start_row + i,
-                "shipment_id": str(row[col_idx["shipment_id"]] or "").strip(),
-                "vendor": str(row[col_idx["vendor"]] or "").strip(),
-                "recipient": str(row[col_idx["recipient"]] or "").strip(),
-                "customer": str(row[col_idx["customer"]] or "").strip(),
-                "order_num": str(row[col_idx["order_num"]] or "").strip(),
+                "row_num":      start_row + i,
+                "shipment_id":  str(row[col_idx["shipment_id"]]  or "").strip(),
+                "vendor":       str(row[col_idx["vendor"]]       or "").strip(),
+                "recipient":    str(row[col_idx["recipient"]]    or "").strip(),
+                "customer":     str(row[col_idx["customer"]]     or "").strip(),
+                "order_num":    str(row[col_idx["order_num"]]    or "").strip(),
                 "tracking_num": tracking,
-                "carrier": str(row[col_idx["carrier"]] or "").strip(),
-                "current_status": str(row[col_idx["status"]] or "").strip(),
-                "delivery_date": str(row[col_idx["delivery_date"]] or "").strip(),
+                "carrier":      str(row[col_idx["carrier"]]      or "").strip(),
+                "current_status": str(row[col_idx["status"]]     or "").strip(),
+                "delivery_date":  str(row[col_idx["delivery_date"]] or "").strip(),
             })
         logger.info(f"Found {len(results)} rows with tracking in sheet {sheet_id}")
         return results
@@ -176,7 +191,7 @@ class LarkClient:
         logger.info(f"Updated {len(updates)} cells in sheet {sheet_id}")
 
     def update_tracking_row(self, spreadsheet_token: str, sheet_id: str,
-                             row_num: int, status: str, delivery_date: str = ""):
+                            row_num: int, status: str, delivery_date: str = ""):
         """Update status and delivery date for a single row."""
         updates = [{"row": row_num, "col": COLUMNS["status"], "value": status}]
         if delivery_date:
@@ -200,8 +215,7 @@ class LarkClient:
             "msg_type": "interactive",
             "content": self._build_card_message(message),
         }
-        resp = requests.post(url, headers=self._headers(),
-                             params=params, json=body, timeout=30)
+        resp = requests.post(url, headers=self._headers(), params=params, json=body, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
@@ -233,15 +247,53 @@ class LarkClient:
                 continue
         return raw_date
 
+    @staticmethod
+    def _format_shipment_line(r, format_delivery_date_fn) -> str:
+        """Format a single shipment as a message line."""
+        tracking = r.get("tracking_num", "N/A")
+
+        # Recipient logic
+        recipient = r.get("recipient", "").strip()
+        customer = r.get("customer", "").strip()
+        if recipient.upper() == "BRENDAN":
+            name = "Brendan"
+        elif recipient.upper() == "CUSTOMER DIRECT":
+            name = customer or "Unknown"
+        else:
+            name = recipient or customer or "Unknown"
+
+        # Delivery date / status description
+        delivery = r.get("delivery_date", "").strip()
+        status = r.get("new_status", "").upper()
+        if status == "OUT FOR DELIVERY":
+            date_str = "out for delivery today"
+        elif status == "LABEL CREATED":
+            date_str = "waiting to ship"
+        elif status == "EXCEPTION":
+            raw = r.get("raw_status", "").strip()
+            date_str = f"exception - {raw}" if raw else "exception"
+        elif status in ("UNKNOWN", "NOT FOUND", "PENDING", ""):
+            date_str = "pending"
+        elif delivery:
+            date_str = format_delivery_date_fn(delivery)
+        else:
+            date_str = "in transit"
+
+        return f"{tracking} -- {name} -- {date_str}"
+
     def send_daily_summary(self, all_results: list):
         """Send daily summary to Lark group chat.
 
-        Format: tracking_number -- recipient -- estimated delivery
-        Dedup same tracking numbers.
-        Brendan -> Brendan. Customer Direct -> customer name.
+        The message is organized into sections:
+          - Hannah (shipments from the Hannah tab)
+          - Lucy   (shipments from the Lucy tab)
+          - Other  (shipments from the Other tab)
+          - <Current month, e.g. FEB> (everything else)
+
+        Within each section, shipments are grouped by carrier.
+        Delivered shipments are excluded. Duplicate tracking numbers are deduped.
         """
-        active = [r for r in all_results
-                  if r.get("new_status", "").upper() != "DELIVERED"]
+        active = [r for r in all_results if r.get("new_status", "").upper() != "DELIVERED"]
 
         if not active:
             self.send_group_message("All shipments delivered. Nothing to track today.")
@@ -256,49 +308,42 @@ class LarkClient:
                 seen.add(tn)
                 unique.append(r)
 
-        # Group by carrier
-        by_carrier = {}
+        # Separate results into named-tab buckets vs month-tab bucket
+        # PERMANENT_TABS order: Hannah, Lucy, Other
+        named_buckets = {tab: [] for tab in PERMANENT_TABS}
+        month_bucket = []
+
         for r in unique:
-            carrier = r.get("carrier", "").strip().upper() or "UNKNOWN"
-            by_carrier.setdefault(carrier, []).append(r)
+            tab = r.get("tab", "").strip()
+            if tab in named_buckets:
+                named_buckets[tab].append(r)
+            else:
+                month_bucket.append(r)
 
         lines = ["**HLT Shipment Tracker**"]
 
-        for carrier in sorted(by_carrier.keys()):
-            items = by_carrier[carrier]
-            lines.append(f"\n**{carrier}**")
-
+        # Helper: render one section (a list of shipments) grouped by carrier
+        def render_section(section_label: str, items: list):
+            if not items:
+                return
+            lines.append(f"\n**— {section_label} —**")
+            by_carrier = {}
             for r in items:
-                tracking = r.get("tracking_num", "N/A")
+                carrier = r.get("carrier", "").strip().upper() or "UNKNOWN"
+                by_carrier.setdefault(carrier, []).append(r)
+            for carrier in sorted(by_carrier.keys()):
+                lines.append(f"\n*{carrier}*")
+                for r in by_carrier[carrier]:
+                    lines.append(self._format_shipment_line(r, self._format_delivery_date))
 
-                # Recipient logic
-                recipient = r.get("recipient", "").strip()
-                customer = r.get("customer", "").strip()
-                if recipient.upper() == "BRENDAN":
-                    name = "Brendan"
-                elif recipient.upper() == "CUSTOMER DIRECT":
-                    name = customer or "Unknown"
-                else:
-                    name = recipient or customer or "Unknown"
+        # Render named tabs first (Hannah, Lucy, Other)
+        for tab_name in PERMANENT_TABS:
+            render_section(tab_name, named_buckets[tab_name])
 
-                # Delivery date / status description
-                delivery = r.get("delivery_date", "").strip()
-                status = r.get("new_status", "").upper()
-
-                if status == "OUT FOR DELIVERY":
-                    date_str = "out for delivery today"
-                elif status == "LABEL CREATED":
-                    date_str = "waiting to ship"
-                elif status == "EXCEPTION":
-                    raw = r.get("raw_status", "").strip()
-                    date_str = f"exception - {raw}" if raw else "exception"
-                elif status in ("UNKNOWN", "NOT FOUND", "PENDING", ""):
-                    date_str = "pending"
-                elif delivery:
-                    date_str = self._format_delivery_date(delivery)
-                else:
-                    date_str = "in transit"
-
-                lines.append(f"{tracking} -- {name} -- {date_str}")
+        # Render the month tab (everything not in a named tab)
+        if month_bucket:
+            # Determine the month label from the first result's tab field
+            month_label = month_bucket[0].get("tab", "Monthly")
+            render_section(month_label, month_bucket)
 
         self.send_group_message("\n".join(lines))
