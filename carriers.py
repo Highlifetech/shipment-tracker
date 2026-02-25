@@ -1,13 +1,12 @@
 """
 Carrier Tracking Clients
-Uses free public tracking endpoints - no API accounts required for FedEx/Royal Mail/USPS.
-UPS uses the UPS Tracking API (existing credentials).
-Each carrier returns a normalized status dict.
+- FedEx/USPS/RoyalMail: use 17track.net free API (no carrier account needed)
+- UPS: uses existing UPS Tracking API credentials
+- DHL: uses existing DHL API key
 """
 import logging
 import time
-import re
-import json
+import os
 import requests
 from config import (
     UPS_CLIENT_ID,
@@ -18,14 +17,15 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
+TRACK17_API_KEY = os.environ.get("TRACK17_API_KEY", "")
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/json, text/html, */*",
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "application/json",
 }
 
 
@@ -52,98 +52,127 @@ def _safe_expires(data: dict, key: str = "expires_in", default: int = 3600) -> i
 
 
 # =============================================================================
-# FedEx - Scrapes the public FedEx tracking API (no account needed)
+# 17track.net API — free tier supports FedEx, USPS, Royal Mail, and 1500+ carriers
+# Sign up free at: https://www.17track.net/en/apidoc
+# Free plan: 100 tracking numbers/month
 # =============================================================================
-class FedExTracker:
-    """Scrapes the FedEx public tracking endpoint."""
+class Track17Tracker:
+    """17track.net API tracker - handles FedEx, USPS, Royal Mail and more."""
 
-    TRACK_URL = "https://www.fedex.com/trackingCal/track"
+    # Carrier codes for 17track
+    # https://www.17track.net/en/apidoc#carrier-list
+    CARRIER_CODES = {
+        "fedex":     100003,   # FedEx
+        "usps":      100001,   # USPS
+        "royalmail": 190001,   # Royal Mail
+        "dhl":       100002,   # DHL (fallback if DHL API fails)
+        "ups":       100005,   # UPS (fallback)
+    }
 
-    def track(self, tracking_number: str) -> dict:
+    REGISTER_URL = "https://api.17track.net/track/v2.2/register"
+    GETTRACK_URL = "https://api.17track.net/track/v2.2/gettrackinfo"
+
+    def track(self, tracking_number: str, carrier: str) -> dict:
+        """Track via 17track.net API."""
+        if not TRACK17_API_KEY:
+            return normalize_result("unknown", error="17track API key not configured. Get free key at https://www.17track.net/en/apidoc")
+
+        carrier_code = self.CARRIER_CODES.get(carrier)
+
         try:
-            payload = {
-                "data": json.dumps({
-                    "TrackPackagesRequest": {
-                        "appType": "WTRK",
-                        "appDeviceType": "DESKTOP",
-                        "uniqueKey": "",
-                        "processingParameters": {},
-                        "trackingInfoList": [
-                            {
-                                "trackNumberInfo": {
-                                    "trackingNumber": tracking_number,
-                                    "trackingQualifier": "",
-                                    "trackingCarrier": "",
-                                }
-                            }
-                        ],
-                    }
-                }),
-                "action": "trackpackages",
-                "locale": "en_US",
-                "version": "1",
-                "format": "json",
-            }
             headers = {
-                **HEADERS,
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Origin": "https://www.fedex.com",
-                "Referer": f"https://www.fedex.com/fedextrack/?trknbr={tracking_number}",
+                "17token": TRACK17_API_KEY,
+                "Content-Type": "application/json",
             }
-            resp = requests.post(self.TRACK_URL, data=payload, headers=headers, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
 
-            pkg_list = (data.get("TrackPackagesResponse", {})
-                           .get("packageList", []))
-            if not pkg_list:
+            # Step 1: Register the tracking number
+            reg_payload = [{"number": tracking_number}]
+            if carrier_code:
+                reg_payload[0]["carrier"] = carrier_code
+
+            reg_resp = requests.post(
+                self.REGISTER_URL,
+                headers=headers,
+                json=reg_payload,
+                timeout=30,
+            )
+            reg_resp.raise_for_status()
+
+            # Step 2: Get tracking info
+            get_payload = [{"number": tracking_number}]
+            if carrier_code:
+                get_payload[0]["carrier"] = carrier_code
+
+            get_resp = requests.post(
+                self.GETTRACK_URL,
+                headers=headers,
+                json=get_payload,
+                timeout=30,
+            )
+            get_resp.raise_for_status()
+            data = get_resp.json()
+
+            # Parse response
+            accepted = data.get("data", {}).get("accepted", [])
+            if not accepted:
+                rejected = data.get("data", {}).get("rejected", [])
+                if rejected:
+                    err = rejected[0].get("error", {}).get("message", "Tracking rejected")
+                    return normalize_result("not_found", error=err)
                 return normalize_result("not_found")
 
-            pkg = pkg_list[0]
-            key_status = pkg.get("keyStatus", "").upper()
-            if key_status in ("NOTFOUND", "NOT_FOUND", "ERROR"):
+            track_info = accepted[0].get("track", {})
+            if not track_info:
                 return normalize_result("not_found")
 
-            raw_status = pkg.get("displayStatus", "") or pkg.get("statusCD", "")
-            status_cd = (pkg.get("statusCD", "") or "").upper()
+            # 17track status codes:
+            # 0=Not Found, 10=In Transit, 20=Expired, 30=Pick Up, 35=Undelivered, 40=Delivered, 50=Exception
+            # e_status is the numeric status
+            e_status = track_info.get("e", 0)
+            z0 = track_info.get("z0", {})   # latest event
+            z1 = track_info.get("z1", {})   # delivery event
 
-            status_map = {
-                "DL": "delivered",
-                "IT": "in_transit",
-                "OD": "out_for_delivery",
-                "DE": "exception",
-                "PU": "in_transit",
-                "PL": "label_created",
-                "OC": "label_created",
-                "AR": "in_transit",
-                "DP": "in_transit",
+            raw_status = (z0.get("z") or z0.get("a", "")).strip() if z0 else ""
+            location = (z0.get("l") or "").strip() if z0 else ""
+
+            status_map_17 = {
+                0:  "not_found",
+                10: "in_transit",
+                20: "exception",    # expired
+                30: "in_transit",   # pick up / accepted
+                35: "exception",    # undelivered
+                40: "delivered",
+                50: "exception",
             }
-            status = status_map.get(status_cd, "in_transit")
+            status = status_map_17.get(e_status, "in_transit")
 
+            # Delivery date
             delivery_date = ""
-            est_del = pkg.get("estDeliveryDt", "") or pkg.get("actDeliveryDt", "")
-            if est_del:
-                try:
-                    from datetime import datetime
-                    for fmt in ("%b %d, %Y", "%Y-%m-%d", "%m/%d/%Y"):
-                        try:
-                            delivery_date = datetime.strptime(est_del.strip(), fmt).strftime("%Y-%m-%d")
-                            break
-                        except ValueError:
-                            continue
-                except Exception:
-                    delivery_date = est_del[:10]
-
-            city = pkg.get("actLocCity", "") or pkg.get("destCity", "")
-            state = pkg.get("actLocStatCD", "") or pkg.get("destStateCD", "")
-            country = pkg.get("actLocCntryCD", "") or pkg.get("destCntryCD", "")
-            location = ", ".join(filter(None, [city, state, country]))
+            if status == "delivered" and z1:
+                ts = z1.get("a", "")
+                if ts and len(ts) >= 10:
+                    delivery_date = ts[:10]
+            elif status == "in_transit":
+                # Check for estimated delivery in latest event
+                ts = z0.get("a", "") if z0 else ""
+                # 17track doesn't provide estimated delivery directly, leave blank
 
             return normalize_result(status, delivery_date, location, raw_status)
 
         except Exception as e:
-            logger.error(f"FedEx tracking error for {tracking_number}: {e}")
+            logger.error(f"17track error for {tracking_number} ({carrier}): {e}")
             return normalize_result("unknown", error=str(e))
+
+
+# =============================================================================
+# FedEx — routes through 17track
+# =============================================================================
+class FedExTracker:
+    def __init__(self):
+        self._17track = Track17Tracker()
+
+    def track(self, tracking_number: str) -> dict:
+        return self._17track.track(tracking_number, "fedex")
 
 
 # =============================================================================
@@ -242,78 +271,32 @@ class UPSTracker:
 
 
 # =============================================================================
-# USPS - Scrapes the public USPS tracking page (no API key needed)
+# USPS — routes through 17track
 # =============================================================================
 class USPSTracker:
-    """Scrapes the USPS public tracking page."""
-
-    TRACK_URL = "https://tools.usps.com/go/TrackConfirmAction"
+    def __init__(self):
+        self._17track = Track17Tracker()
 
     def track(self, tracking_number: str) -> dict:
-        try:
-            headers = {**HEADERS, "Referer": "https://tools.usps.com/go/TrackConfirmAction"}
-            resp = requests.get(
-                self.TRACK_URL,
-                params={"tLabels": tracking_number},
-                headers=headers,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            html = resp.text
-
-            raw_status = ""
-            status = "in_transit"
-            delivery_date = ""
-
-            if re.search(r'Delivered', html, re.IGNORECASE):
-                status = "delivered"
-                raw_status = "Delivered"
-                date_match = re.search(
-                    r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})',
-                    html, re.IGNORECASE
-                )
-                if date_match:
-                    try:
-                        from datetime import datetime
-                        delivery_date = datetime.strptime(date_match.group(0), "%B %d, %Y").strftime("%Y-%m-%d")
-                    except Exception:
-                        pass
-            elif re.search(r'Out for Delivery', html, re.IGNORECASE):
-                status = "out_for_delivery"
-                raw_status = "Out for Delivery"
-            elif re.search(r'In Transit', html, re.IGNORECASE):
-                status = "in_transit"
-                raw_status = "In Transit"
-            elif re.search(r'Alert', html, re.IGNORECASE):
-                status = "exception"
-                raw_status = "Alert"
-            elif re.search(r'Pre-Shipment|Label Created', html, re.IGNORECASE):
-                status = "label_created"
-                raw_status = "Pre-Shipment Info Sent"
-            else:
-                if "not found" in html.lower() or "not available" in html.lower():
-                    return normalize_result("not_found")
-                raw_status = "In Transit"
-
-            return normalize_result(status, delivery_date, "", raw_status)
-
-        except Exception as e:
-            logger.error(f"USPS tracking error for {tracking_number}: {e}")
-            return normalize_result("unknown", error=str(e))
+        return self._17track.track(tracking_number, "usps")
 
 
 # =============================================================================
-# DHL Tracking API (existing - kept as-is)
+# DHL Tracking API (existing - kept as-is, falls back to 17track if no key)
 # =============================================================================
 class DHLTracker:
     """DHL Unified Tracking API."""
 
     TRACK_URL = "https://api-eu.dhl.com/track/shipments"
 
+    def __init__(self):
+        self._17track = Track17Tracker()
+
     def track(self, tracking_number: str) -> dict:
+        # Use DHL API if key configured, else fall back to 17track
+        if not DHL_API_KEY:
+            return self._17track.track(tracking_number, "dhl")
         try:
-            if not DHL_API_KEY:
-                raise Exception("DHL API key not configured")
             resp = requests.get(
                 self.TRACK_URL,
                 headers={"DHL-API-Key": DHL_API_KEY},
@@ -358,95 +341,21 @@ class DHLTracker:
             if e.response and e.response.status_code == 404:
                 return normalize_result("not_found")
             logger.error(f"DHL tracking error for {tracking_number}: {e}")
-            return normalize_result("unknown", error=str(e))
+            return self._17track.track(tracking_number, "dhl")
         except Exception as e:
             logger.error(f"DHL tracking error for {tracking_number}: {e}")
             return normalize_result("unknown", error=str(e))
 
 
 # =============================================================================
-# Royal Mail - Uses public Royal Mail tracking API (no API key needed)
+# Royal Mail — routes through 17track
 # =============================================================================
 class RoyalMailTracker:
-    """Uses the Royal Mail public tracking endpoint."""
+    def __init__(self):
+        self._17track = Track17Tracker()
 
     def track(self, tracking_number: str) -> dict:
-        try:
-            url = f"https://api.royalmail.com/mailpieces/v2/{tracking_number}/events"
-            headers = {
-                **HEADERS,
-                "Accept": "application/json",
-                "Referer": f"https://www.royalmail.com/track-your-item#/tracking-results/{tracking_number}",
-            }
-            resp = requests.get(url, headers=headers, timeout=30)
-
-            if resp.status_code == 404:
-                return normalize_result("not_found")
-
-            if resp.status_code == 200:
-                data = resp.json()
-                mail_pieces = data.get("mailPieces", [])
-                if not mail_pieces:
-                    return normalize_result("not_found")
-
-                piece = mail_pieces[0]
-                events = piece.get("events", [])
-                summary = piece.get("summary", {})
-                status_desc = summary.get("statusDescription", "").lower()
-                raw_status = summary.get("statusDescription", "")
-
-                if "delivered" in status_desc:
-                    status = "delivered"
-                elif "out for delivery" in status_desc or "with delivery" in status_desc:
-                    status = "out_for_delivery"
-                elif "exception" in status_desc or "returned" in status_desc or "failed" in status_desc:
-                    status = "exception"
-                elif "posted" in status_desc or "dispatched" in status_desc or "collected" in status_desc:
-                    status = "label_created"
-                elif status_desc:
-                    status = "in_transit"
-                else:
-                    status = "in_transit"
-
-                delivery_date = ""
-                if status == "delivered" and events:
-                    ts = events[0].get("eventDateTime", "")
-                    if ts:
-                        delivery_date = ts[:10]
-                estimated = summary.get("estimatedDeliveryDate", {})
-                if estimated and not delivery_date:
-                    start = estimated.get("startOfEstimatedWindow", "")
-                    if start:
-                        delivery_date = start[:10]
-
-                location = ""
-                if events:
-                    location = events[0].get("locationName", "")
-
-                return normalize_result(status, delivery_date, location, raw_status)
-
-            # Fallback: scrape the tracking page
-            resp2 = requests.get(
-                "https://www.royalmail.com/track-your-item",
-                params={"trackNumber": tracking_number},
-                headers=HEADERS,
-                timeout=30,
-            )
-            html = resp2.text
-            if "delivered" in html.lower():
-                return normalize_result("delivered", "", "", "Delivered")
-            elif "out for delivery" in html.lower():
-                return normalize_result("out_for_delivery", "", "", "Out for Delivery")
-            elif "exception" in html.lower() or "returned" in html.lower():
-                return normalize_result("exception", "", "", "Exception")
-            elif "not found" in html.lower():
-                return normalize_result("not_found")
-            else:
-                return normalize_result("in_transit", "", "", "In Transit")
-
-        except Exception as e:
-            logger.error(f"Royal Mail tracking error for {tracking_number}: {e}")
-            return normalize_result("unknown", error=str(e))
+        return self._17track.track(tracking_number, "royalmail")
 
 
 # =============================================================================
