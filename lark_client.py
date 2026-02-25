@@ -255,8 +255,15 @@ class LarkClient:
             lines.append(f"\n**{carrier}**")
             for r in items:
                 tracking = r.get("tracking_num", "N/A")
-                # Use Customer (col E) as the display name — that's who the package is for
-                name = r.get("customer", "").strip() or r.get("recipient", "").strip() or "Unknown"
+                # Name logic:
+                # - Recipient = "CUSTOMER DIRECT" → use Customer name (col E)
+                # - Recipient = anything else (e.g. "BRENDAN") → use Recipient as-is
+                recipient = r.get("recipient", "").strip()
+                customer = r.get("customer", "").strip()
+                if recipient.upper() == "CUSTOMER DIRECT":
+                    name = customer or "Unknown"
+                else:
+                    name = recipient or customer or "Unknown"
                 status = r.get("new_status", "").upper()
                 delivery = r.get("delivery_date", "").strip()
                 raw = r.get("raw_status", "").strip()
