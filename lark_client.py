@@ -246,57 +246,50 @@ class LarkClient:
         return json.dumps(card)
 
     def send_daily_summary(self, all_results: list):
-        """Send a daily summary of all tracking statuses to the group chat.
-        
-        all_results: list of dicts from process_sheet() results
-        """
-        if not all_results:
-            self.send_group_message("No shipments with tracking numbers found today.")
+        """Send a summary of active (non-delivered) shipments to the group chat."""
+        # Filter out delivered shipments
+        active = [r for r in all_results if r.get("new_status", "").upper() != "DELIVERED"]
+
+        if not active:
+            self.send_group_message("✅ All shipments have been delivered!")
             return
+
+        emoji_map = {
+            "IN TRANSIT": "🚚",
+            "OUT FOR DELIVERY": "📬",
+            "EXCEPTION": "⚠️",
+            "LABEL CREATED": "🏷️",
+            "PENDING": "⏳",
+            "NOT FOUND": "❓",
+            "UNKNOWN": "❓",
+        }
+
+        priority_order = ["EXCEPTION", "OUT FOR DELIVERY", "IN TRANSIT",
+                          "LABEL CREATED", "PENDING", "NOT FOUND", "UNKNOWN"]
 
         # Group by status
         by_status = {}
-        for r in all_results:
+        for r in active:
             status = r.get("new_status", "UNKNOWN")
             by_status.setdefault(status, []).append(r)
 
         lines = []
-        lines.append(f"**Daily Tracking Summary** — {len(all_results)} shipments checked\n")
-
-        # Show non-delivered first (these are the actionable ones)
-        priority_order = ["EXCEPTION", "OUT FOR DELIVERY", "IN TRANSIT",
-                          "LABEL CREATED", "PENDING", "NOT FOUND", "UNKNOWN", "DELIVERED"]
+        lines.append(f"**📦 Shipment Update** — {len(active)} active shipment(s)\n")
 
         for status in priority_order:
             items = by_status.get(status, [])
             if not items:
                 continue
-
-            emoji = {
-                "DELIVERED": "✅",
-                "IN TRANSIT": "🚚",
-                "OUT FOR DELIVERY": "📬",
-                "EXCEPTION": "⚠️",
-                "LABEL CREATED": "🏷️",
-                "PENDING": "⏳",
-                "NOT FOUND": "❓",
-                "UNKNOWN": "❓",
-            }.get(status, "📦")
-
+            emoji = emoji_map.get(status, "📦")
             lines.append(f"\n{emoji} **{status}** ({len(items)})")
-            for r in items[:15]:  # Limit to avoid huge messages
-                tracking_short = r["tracking_num"][-8:] if len(r["tracking_num"]) > 8 else r["tracking_num"]
-                carrier = r.get("carrier", "?")
-                recipient = r.get("recipient", "?")
-                customer = r.get("customer", "?")
-                line = f"  • `...{tracking_short}` | {carrier} | {recipient} → {customer}"
-                if r.get("delivery_date"):
-                    line += f" | 📅 {r['delivery_date']}"
-                if r.get("location"):
-                    line += f" | 📍 {r['location']}"
+            for r in items:
+                name = r.get("recipient") or r.get("customer") or "Unknown"
+                tracking = r.get("tracking_num", "")
+                delivery = r.get("delivery_date", "")
+                line = f"  • **{name}** | `{tracking}`"
+                if delivery:
+                    line += f" | 📅 {delivery}"
                 lines.append(line)
-            if len(items) > 15:
-                lines.append(f"  _...and {len(items) - 15} more_")
 
         message = "\n".join(lines)
         self.send_group_message(message)
