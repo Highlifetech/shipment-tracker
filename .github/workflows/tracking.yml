@@ -37,4 +37,4 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run tracking bot
-        run: python test_message.py
+        run: python main.py
