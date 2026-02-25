@@ -56,32 +56,21 @@ COLUMNS = {
 HEADER_ROW = 2
 
 # =============================================================================
-# CARRIER API CREDENTIALS (all free tier)
+# CARRIER API CREDENTIALS
+# FedEx, USPS, Royal Mail use free public scraping — no keys needed.
+# UPS and DHL use API credentials below.
 # =============================================================================
 
-# FedEx — https://developer.fedex.com
-FEDEX_API_KEY    = os.environ.get("FEDEX_API_KEY", "")
-FEDEX_SECRET_KEY = os.environ.get("FEDEX_SECRET_KEY", "")
-
 # UPS — https://developer.ups.com
-UPS_CLIENT_ID     = os.environ.get("UPS_CLIENT_ID", "")
+UPS_CLIENT_ID = os.environ.get("UPS_CLIENT_ID", "")
 UPS_CLIENT_SECRET = os.environ.get("UPS_CLIENT_SECRET", "")
 
-# USPS — https://developer.usps.com
-USPS_CLIENT_ID     = os.environ.get("USPS_CLIENT_ID", "")
-USPS_CLIENT_SECRET = os.environ.get("USPS_CLIENT_SECRET", "")
-
-# DHL — https://developer.dhl.com
+# DHL — https://developer.dhl.com (free tier)
 DHL_API_KEY = os.environ.get("DHL_API_KEY", "")
-
-# Royal Mail — https://developer.royalmail.net
-# Get a free API key at https://developer.royalmail.net (register -> create app -> Tracking API)
-ROYALMAIL_API_KEY = os.environ.get("ROYALMAIL_API_KEY", "")
 
 # =============================================================================
 # BOT SETTINGS
 # =============================================================================
-
 # Sheet tabs to skip
 SKIP_TABS = {"TEMPLATE"}
 
@@ -112,7 +101,7 @@ CARRIER_ALIASES = {
 STATUS_MAP = {
     "delivered":       "DELIVERED",
     "in_transit":      "IN TRANSIT",
-    "out_for_delivery":"OUT FOR DELIVERY",
+    "out_for_delivery": "OUT FOR DELIVERY",
     "exception":       "EXCEPTION",
     "pending":         "PENDING",
     "label_created":   "LABEL CREATED",
