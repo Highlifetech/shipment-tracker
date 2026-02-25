@@ -1,17 +1,12 @@
 """
 Lark API Client
-
-Handles authentication, reading/writing Lark Sheets,
-and sending group chat messages.
+Handles authentication, reading/writing Lark Sheets, and sending group chat messages.
 Uses JP-region endpoints for Lark Suite.
 """
-
 import json
 import logging
 import time
-
 import requests
-
 from config import (
     LARK_APP_ID, LARK_APP_SECRET, LARK_BASE_URL,
     LARK_CHAT_ID, COLUMNS, HEADER_ROW, SKIP_TABS,
@@ -60,8 +55,10 @@ class LarkClient:
     # Sheet Operations
     # -------------------------------------------------------------------------
 
-    def get_sheet_metadata(self, spreadsheet_token):
-        """Get all sheet tabs (name, id) in a spreadsheet."""
+    def get_sheet_metadata(self, spreadsheet_token: str) -> list:
+        """Get all sheet tabs (name, id) in a spreadsheet.
+        Tries v3 first, falls back to v2 if that fails.
+        """
         url_v3 = f"{self.base_url}/open-apis/sheets/v3/spreadsheets/{spreadsheet_token}/sheets/query"
         resp = requests.get(url_v3, headers=self._headers(), timeout=30)
         if resp.ok:
@@ -89,7 +86,7 @@ class LarkClient:
             logger.error(f"v2 HTTP {resp2.status_code} token={spreadsheet_token} body={resp2.text[:200]}")
             raise Exception(f"Cannot read spreadsheet {spreadsheet_token}: HTTP {resp2.status_code}")
 
-    def _parse_sheets(self, sheets, spreadsheet_token):
+    def _parse_sheets(self, sheets: list, spreadsheet_token: str) -> list:
         result = []
         for s in sheets:
             title = s.get("title", "")
@@ -99,11 +96,15 @@ class LarkClient:
         logger.info(f"Found {len(result)} tabs in {spreadsheet_token}")
         return result
 
-    def read_sheet_range(self, spreadsheet_token, sheet_id, start_col, end_col, start_row, end_row):
+    def read_sheet_range(self, spreadsheet_token: str, sheet_id: str,
+                         start_col: str, end_col: str,
+                         start_row: int, end_row: int) -> list:
         """Read a range of cells from a sheet tab."""
         range_str = f"{sheet_id}!{start_col}{start_row}:{end_col}{end_row}"
-        url = (f"{self.base_url}/open-apis/sheets/v2/spreadsheets/"
-               f"{spreadsheet_token}/values/{range_str}")
+        url = (
+            f"{self.base_url}/open-apis/sheets/v2/spreadsheets/"
+            f"{spreadsheet_token}/values/{range_str}"
+        )
         resp = requests.get(url, headers=self._headers(),
                             params={"valueRenderOption": "ToString"}, timeout=30)
         resp.raise_for_status()
@@ -112,7 +113,7 @@ class LarkClient:
             raise Exception(f"Failed to read range {range_str}: {data}")
         return data.get("data", {}).get("valueRange", {}).get("values", [])
 
-    def read_tracking_data(self, spreadsheet_token, sheet_id):
+    def read_tracking_data(self, spreadsheet_token: str, sheet_id: str) -> list:
         """Read all rows with tracking data from a sheet tab."""
         start_row = HEADER_ROW + 1
         rows = self.read_sheet_range(
@@ -121,15 +122,15 @@ class LarkClient:
             start_row=start_row, end_row=500,
         )
         col_idx = {
-            "shipment_id": 0,
-            "vendor": 1,
-            "recipient": 2,
-            "order_num": 3,
-            "customer": 4,
-            "tracking_num": 6,
-            "carrier": 7,
-            "status": 12,
-            "delivery_date": 16,
+            "shipment_id": 0,    # A
+            "vendor": 1,         # B
+            "recipient": 2,      # C
+            "order_num": 3,      # D
+            "customer": 4,       # E
+            "tracking_num": 6,   # G
+            "carrier": 7,        # H
+            "status": 12,        # M
+            "delivery_date": 16, # Q
         }
         results = []
         for i, row in enumerate(rows):
@@ -153,7 +154,7 @@ class LarkClient:
         logger.info(f"Found {len(results)} rows with tracking in sheet {sheet_id}")
         return results
 
-    def write_cells(self, spreadsheet_token, sheet_id, updates):
+    def write_cells(self, spreadsheet_token: str, sheet_id: str, updates: list):
         """Write values to specific cells."""
         if not updates:
             return
@@ -161,8 +162,10 @@ class LarkClient:
         for u in updates:
             range_str = f"{sheet_id}!{u['col']}{u['row']}:{u['col']}{u['row']}"
             value_ranges.append({"range": range_str, "values": [[u["value"]]]})
-        url = (f"{self.base_url}/open-apis/sheets/v2/spreadsheets/"
-               f"{spreadsheet_token}/values_batch_update")
+        url = (
+            f"{self.base_url}/open-apis/sheets/v2/spreadsheets/"
+            f"{spreadsheet_token}/values_batch_update"
+        )
         resp = requests.post(url, headers=self._headers(),
                              json={"valueRanges": value_ranges}, timeout=30)
         resp.raise_for_status()
@@ -171,7 +174,8 @@ class LarkClient:
             raise Exception(f"Failed to write cells: {data}")
         logger.info(f"Updated {len(updates)} cells in sheet {sheet_id}")
 
-    def update_tracking_row(self, spreadsheet_token, sheet_id, row_num, status, delivery_date=""):
+    def update_tracking_row(self, spreadsheet_token: str, sheet_id: str,
+                             row_num: int, status: str, delivery_date: str = ""):
         """Update status and delivery date for a single row."""
         updates = [{"row": row_num, "col": COLUMNS["status"], "value": status}]
         if delivery_date:
@@ -182,7 +186,7 @@ class LarkClient:
     # Messaging
     # -------------------------------------------------------------------------
 
-    def send_group_message(self, message, chat_id=None):
+    def send_group_message(self, message: str, chat_id: str = None):
         """Send a text message to a Lark group chat."""
         target_chat = chat_id or LARK_CHAT_ID
         if not target_chat:
@@ -203,19 +207,19 @@ class LarkClient:
             raise Exception(f"Failed to send message: {data}")
         logger.info("Message sent to group chat")
 
-    def _build_card_message(self, text_content):
+    def _build_card_message(self, text_content: str) -> str:
         """Build a Lark interactive card message."""
         card = {
             "config": {"wide_screen_mode": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "HLT Shipment Update"},
+                "title": {"tag": "plain_text", "content": "📦 HLT Shipment Update"},
                 "template": "blue",
             },
             "elements": [{"tag": "markdown", "content": text_content}],
         }
         return json.dumps(card)
 
-    def send_daily_summary(self, all_results):
+    def send_daily_summary(self, all_results: list):
         """Send daily summary to Lark group chat.
 
         Format: tracking_number -- recipient -- estimated delivery
