@@ -165,7 +165,7 @@ class LarkClient:
             return
         value_ranges = []
         for u in updates:
-            range_str = f"{sheet_id}!{u['col']}{u['row']}"
+            range_str = f"{sheet_id}!{u['col']}{u['row']}:{u['col']}{u['row']}"
             value_ranges.append({"range": range_str, "values": [[u["value"]]]})
         url = (
             f"{self.base_url}/open-apis/sheets/v2/spreadsheets/"
