@@ -57,9 +57,11 @@ HEADER_ROW = 2
 
 # =============================================================================
 # CARRIER API CREDENTIALS
-# FedEx, USPS, Royal Mail use free public scraping — no keys needed.
-# UPS and DHL use API credentials below.
 # =============================================================================
+
+# FedEx — https://developer.fedex.com
+FEDEX_API_KEY = os.environ.get("FEDEX_API_KEY", "")
+FEDEX_SECRET_KEY = os.environ.get("FEDEX_SECRET_KEY", "")
 
 # UPS — https://developer.ups.com
 UPS_CLIENT_ID = os.environ.get("UPS_CLIENT_ID", "")
