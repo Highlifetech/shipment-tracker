@@ -1,13 +1,14 @@
 """
 Lark Shipment Tracking Bot — Main Entry Point
 
-Reads tracking numbers from Lark Sheets (current month tab only),
-checks status via carrier APIs, updates the sheet only on real status changes,
+Reads tracking numbers from Lark Sheets.
+Scans the current month tab PLUS the permanent tabs: Hannah, Lucy, and Other.
+Checks status via carrier APIs, updates the sheet only on real status changes,
 and sends a daily summary to a Lark group chat.
 
 Usage:
-    python main.py           # Run once
-    python main.py --dry-run # Run without writing to sheets or sending messages
+    python main.py            # Run once
+    python main.py --dry-run  # Run without writing to sheets or sending messages
 """
 import sys
 import logging
@@ -30,6 +31,9 @@ MONTH_TABS = {
     9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC",
 }
 
+# These permanent named tabs are always scanned in addition to the current month
+PERMANENT_TABS = {"Hannah", "Lucy", "Other"}
+
 # These statuses mean the carrier API gave us nothing real — don't write to sheet
 BAD_STATUSES = {"UNKNOWN", "NOT FOUND", ""}
 
@@ -47,9 +51,13 @@ def current_month_tab() -> str:
     return MONTH_TABS[datetime.utcnow().month]
 
 
-def process_sheet(lark: LarkClient, tracker: CarrierTracker,
-                  spreadsheet_token: str, dry_run: bool = False) -> list:
-    """Process the current month's tab in a spreadsheet.
+def process_sheet(lark: LarkClient, tracker: CarrierTracker, spreadsheet_token: str, dry_run: bool = False) -> list:
+    """Process all relevant tabs in a spreadsheet.
+
+    Scans:
+      - The current month tab (e.g. 'FEB')
+      - Any of the permanent tabs that exist in the sheet: Hannah, Lucy, Other
+
     Returns list of result dicts for the daily summary.
     """
     all_results = []
@@ -61,91 +69,103 @@ def process_sheet(lark: LarkClient, tracker: CarrierTracker,
         logger.error(f"Failed to read spreadsheet {spreadsheet_token}: {e}")
         return all_results
 
-    # Only process the current month tab
+    # Determine which tabs to process
     target_tab = current_month_tab()
-    current_tabs = [t for t in tabs if t["title"].upper() == target_tab]
+    tabs_to_process = []
+    for t in tabs:
+        title = t["title"]
+        if title.upper() == target_tab or title in PERMANENT_TABS:
+            tabs_to_process.append(t)
 
-    if not current_tabs:
-        logger.warning(f"Tab '{target_tab}' not found in spreadsheet {spreadsheet_token}")
-        logger.info(f"Available tabs: {[t['title'] for t in tabs]}")
+    if not tabs_to_process:
+        logger.warning(
+            f"No matching tabs found in spreadsheet {spreadsheet_token}. "
+            f"Looking for: {target_tab}, Hannah, Lucy, Other. "
+            f"Available: {[t['title'] for t in tabs]}"
+        )
         return all_results
 
-    tab = current_tabs[0]
-    tab_title = tab["title"]
-    sheet_id = tab["sheet_id"]
-    logger.info(f"Processing tab: {tab_title} ({sheet_id})")
+    logger.info(f"Processing tabs: {[t['title'] for t in tabs_to_process]} in {spreadsheet_token}")
 
-    try:
-        rows = lark.read_tracking_data(spreadsheet_token, sheet_id)
-    except Exception as e:
-        logger.error(f"Failed to read tab {tab_title}: {e}")
-        return all_results
+    for tab in tabs_to_process:
+        tab_title = tab["title"]
+        sheet_id = tab["sheet_id"]
+        logger.info(f"Processing tab: {tab_title} ({sheet_id})")
 
-    logger.info(f"Found {len(rows)} rows with tracking numbers")
-
-    for row in rows:
-        tracking_num = row["tracking_num"]
-        carrier_raw = row["carrier"]
-        current_status = row.get("current_status", "").strip().upper()
-
-        # Skip already-delivered shipments
-        if current_status in DONE_STATUSES:
-            logger.info(f"Skipping {tracking_num} — already DELIVERED")
+        try:
+            rows = lark.read_tracking_data(spreadsheet_token, sheet_id)
+        except Exception as e:
+            logger.error(f"Failed to read tab {tab_title}: {e}")
             continue
 
-        carrier = normalize_carrier(carrier_raw)
-        if not carrier or carrier not in CARRIER_ALIASES.values():
-            logger.warning(f"Row {row['row_num']}: Unknown carrier '{carrier_raw}', including with current status")
-            all_results.append({
-                **row,
-                "new_status": current_status or "UNKNOWN CARRIER",
-                "tab": tab_title,
-                "sheet_token": spreadsheet_token,
-            })
-            continue
+        logger.info(f"Found {len(rows)} rows with tracking numbers in tab '{tab_title}'")
 
-        # Call carrier API
-        result = tracker.track(tracking_num, carrier)
-        new_status = result["status"]          # e.g. "IN TRANSIT"
-        delivery_date = result.get("delivery_date", "")
-        raw_status = result.get("raw_status", "")
-        api_error = result.get("error", "")
+        for row in rows:
+            tracking_num = row["tracking_num"]
+            carrier_raw = row["carrier"]
+            current_status = row.get("current_status", "").strip().upper()
 
-        # Determine what to write to sheet and show in message
-        if api_error or new_status.upper() in BAD_STATUSES:
-            # API failed — keep existing sheet status, show it in message
-            display_status = current_status if current_status else "PENDING"
-            logger.warning(f"{tracking_num}: API error ({api_error[:60]}), keeping '{display_status}'")
-            all_results.append({
-                **row,
-                "new_status": display_status,
-                "delivery_date": row.get("delivery_date", ""),
-                "raw_status": raw_status,
-                "tab": tab_title,
-                "sheet_token": spreadsheet_token,
-            })
-        else:
-            # Good status — write to sheet if it changed
-            if not dry_run and new_status.upper() != current_status:
-                try:
-                    lark.update_tracking_row(
-                        spreadsheet_token, sheet_id,
-                        row["row_num"], new_status, delivery_date,
-                    )
-                    logger.info(f"Updated {tracking_num}: {current_status} → {new_status}")
-                except Exception as e:
-                    logger.error(f"Failed to write row {row['row_num']}: {e}")
+            # Skip already-delivered shipments
+            if current_status in DONE_STATUSES:
+                logger.info(f"Skipping {tracking_num} — already DELIVERED")
+                continue
 
-            all_results.append({
-                **row,
-                "new_status": new_status,
-                "delivery_date": delivery_date,
-                "raw_status": raw_status,
-                "tab": tab_title,
-                "sheet_token": spreadsheet_token,
-            })
+            carrier = normalize_carrier(carrier_raw)
+            if not carrier or carrier not in CARRIER_ALIASES.values():
+                logger.warning(f"Row {row['row_num']}: Unknown carrier '{carrier_raw}', including with current status")
+                all_results.append({
+                    **row,
+                    "new_status": current_status or "UNKNOWN CARRIER",
+                    "tab": tab_title,
+                    "sheet_token": spreadsheet_token,
+                })
+                continue
 
-        time.sleep(0.5)
+            # Call carrier API
+            result = tracker.track(tracking_num, carrier)
+            new_status = result["status"]          # e.g. "IN TRANSIT"
+            delivery_date = result.get("delivery_date", "")
+            raw_status = result.get("raw_status", "")
+            api_error = result.get("error", "")
+
+            # Determine what to write to sheet and show in message
+            if api_error or new_status.upper() in BAD_STATUSES:
+                # API failed — keep existing sheet status, show it in message
+                display_status = current_status if current_status else "PENDING"
+                logger.warning(f"{tracking_num}: API error ({api_error[:60]}), keeping '{display_status}'")
+                all_results.append({
+                    **row,
+                    "new_status": display_status,
+                    "delivery_date": row.get("delivery_date", ""),
+                    "raw_status": raw_status,
+                    "tab": tab_title,
+                    "sheet_token": spreadsheet_token,
+                })
+            else:
+                # Good status — write to sheet if it changed
+                if not dry_run and new_status.upper() != current_status:
+                    try:
+                        lark.update_tracking_row(
+                            spreadsheet_token,
+                            sheet_id,
+                            row["row_num"],
+                            new_status,
+                            delivery_date,
+                        )
+                        logger.info(f"Updated {tracking_num}: {current_status} → {new_status}")
+                    except Exception as e:
+                        logger.error(f"Failed to write row {row['row_num']}: {e}")
+
+                all_results.append({
+                    **row,
+                    "new_status": new_status,
+                    "delivery_date": delivery_date,
+                    "raw_status": raw_status,
+                    "tab": tab_title,
+                    "sheet_token": spreadsheet_token,
+                })
+
+            time.sleep(0.5)
 
     return all_results
 
@@ -160,6 +180,7 @@ def main():
         sys.exit(1)
 
     logger.info(f"Target month tab: {current_month_tab()}")
+    logger.info(f"Also scanning permanent tabs: {sorted(PERMANENT_TABS)}")
 
     lark = LarkClient()
     tracker = CarrierTracker()
