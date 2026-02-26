@@ -1,9 +1,8 @@
-"""
-Lark API Client
+""" Lark API Client
 
-Handles authentication, reading/writing Lark Sheets,
-and sending group chat messages.
+Handles authentication, reading/writing Lark Sheets, and sending group chat messages.
 """
+
 import json
 import logging
 from datetime import datetime
@@ -135,7 +134,7 @@ class LarkClient:
             "customer":      4,   # E
             "tracking_num":  6,   # G
             "carrier":       7,   # H
-            "status":        12,  # M
+            "status":       12,   # M
             "delivery_date": 16,  # Q
         }
         results = []
@@ -146,15 +145,15 @@ class LarkClient:
             if not tracking:
                 continue
             results.append({
-                "row_num":        start_row + i,
-                "shipment_id":    str(row[col_idx["shipment_id"]]   or "").strip(),
-                "vendor":         str(row[col_idx["vendor"]]        or "").strip(),
-                "recipient":      str(row[col_idx["recipient"]]     or "").strip(),
-                "customer":       str(row[col_idx["customer"]]      or "").strip(),
-                "order_num":      str(row[col_idx["order_num"]]     or "").strip(),
-                "tracking_num":   tracking,
-                "carrier":        str(row[col_idx["carrier"]]       or "").strip(),
-                "current_status": str(row[col_idx["status"]]        or "").strip(),
+                "row_num":      start_row + i,
+                "shipment_id":  str(row[col_idx["shipment_id"]]  or "").strip(),
+                "vendor":       str(row[col_idx["vendor"]]       or "").strip(),
+                "recipient":    str(row[col_idx["recipient"]]    or "").strip(),
+                "customer":     str(row[col_idx["customer"]]     or "").strip(),
+                "order_num":    str(row[col_idx["order_num"]]    or "").strip(),
+                "tracking_num": tracking,
+                "carrier":      str(row[col_idx["carrier"]]      or "").strip(),
+                "current_status": str(row[col_idx["status"]]    or "").strip(),
                 "delivery_date":  str(row[col_idx["delivery_date"]] or "").strip(),
             })
         logger.info(f"  {len(results)} rows with tracking in sheet {sheet_id}")
@@ -183,8 +182,7 @@ class LarkClient:
         """Update status and delivery date for a single row."""
         updates = [{"row": row_num, "col": COLUMNS["status"], "value": status}]
         if delivery_date:
-            updates.append({"row": row_num, "col": COLUMNS["delivery_date"],
-                            "value": delivery_date})
+            updates.append({"row": row_num, "col": COLUMNS["delivery_date"], "value": delivery_date})
         self.write_cells(spreadsheet_token, sheet_id, updates)
 
     # -------------------------------------------------------------------------
@@ -204,8 +202,7 @@ class LarkClient:
             "msg_type": "interactive",
             "content": self._build_card_message(message),
         }
-        resp = requests.post(url, headers=self._headers(),
-                             params=params, json=body, timeout=30)
+        resp = requests.post(url, headers=self._headers(), params=params, json=body, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
@@ -242,27 +239,25 @@ class LarkClient:
         """Determine which named section (Hannah / Lucy / Other) a shipment belongs to.
 
         For rows from a named tab (Hannah / Lucy / Other), use the tab name directly.
-        For rows from a month tab (JAN / FEB / …), use the recipient field — the
-        recipient column records which named tab the order belongs to.
+        For rows from a month tab (JAN / FEB / …), use the recipient field —
+        the recipient column records which named tab the order belongs to.
         Falls back to 'Other' if nothing matches.
         """
         tab = r.get("tab", "").strip()
         if tab in PERMANENT_TABS:
             return tab
-
         # Month-tab row — route by recipient name
         recipient = r.get("recipient", "").strip().title()  # e.g. "Hannah", "Lucy", "Other"
         if recipient in PERMANENT_TABS:
             return recipient
-
         return "Other"  # safe fallback
 
     @staticmethod
     def _shipment_line(r: dict) -> str:
-        """Format one shipment as:  tracking_num -- display_name -- status/date"""
-        tracking  = r.get("tracking_num", "N/A")
+        """Format one shipment as: tracking_num -- display_name -- status/date"""
+        tracking = r.get("tracking_num", "N/A")
         recipient = r.get("recipient", "").strip()
-        customer  = r.get("customer",  "").strip()
+        customer  = r.get("customer", "").strip()
 
         if recipient.upper() == "BRENDAN":
             name = "Brendan"
@@ -272,8 +267,8 @@ class LarkClient:
             name = recipient or customer or "Unknown"
 
         delivery = r.get("delivery_date", "").strip()
-        status   = r.get("new_status",    "").upper()
-        raw      = r.get("raw_status",    "").strip()
+        status   = r.get("new_status", "").upper()
+        raw      = r.get("raw_status", "").strip()
 
         if status == "OUT FOR DELIVERY":
             date_str = "out for delivery today"
@@ -294,15 +289,16 @@ class LarkClient:
         """Send the daily summary card to the Lark group chat.
 
         The message always has exactly three sections:
-          **— Hannah —**
-          **— Lucy —**
-          **— Other —**
+            **— Hannah —**
+            **— Lucy —**
+            **— Other —**
 
-        Every shipment (whether it came from a named tab or a month tab)
-        is routed into the correct section via _section_for().
-        Empty sections are omitted.
+        Every shipment (whether it came from a named tab or a month tab) is routed
+        into the correct section via _section_for().
+        All three section headers are always shown.
         Within each section shipments are grouped by carrier (alphabetical).
-        Delivered shipments are excluded. Duplicates are deduped.
+        Delivered shipments are excluded.
+        Duplicates are deduped.
         """
         active = [r for r in all_results if r.get("new_status", "").upper() != "DELIVERED"]
 
@@ -318,8 +314,8 @@ class LarkClient:
                 seen.add(tn)
                 unique.append(r)
 
-        # Route every shipment into Hannah / Lucy / Other
-        buckets: dict[str, list] = {tab: [] for tab in PERMANENT_TABS}
+        # Route every shipment into Hannah / Lucy / Other buckets
+        buckets = {tab: [] for tab in PERMANENT_TABS}
         for r in unique:
             section = self._section_for(r)
             buckets[section].append(r)
@@ -327,10 +323,11 @@ class LarkClient:
         lines = ["**HLT Shipment Tracker**"]
 
         def render_section(label: str, items: list):
-            if not items:
-                return
             lines.append(f"\n**— {label} —**")
-            by_carrier: dict[str, list] = {}
+            if not items:
+                lines.append("No active shipments")
+                return
+            by_carrier: dict = {}
             for r in items:
                 c = r.get("carrier", "").strip().upper() or "UNKNOWN"
                 by_carrier.setdefault(c, []).append(r)
