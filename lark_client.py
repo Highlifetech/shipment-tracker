@@ -18,6 +18,7 @@ from config import (
     COLUMNS,
     HEADER_ROW,
     SKIP_TABS,
+    SHEET_OWNERS,
 )
 
 logger = logging.getLogger(__name__)
@@ -238,26 +239,11 @@ class LarkClient:
     def _section_for(r: dict) -> str:
         """Determine which named section (Hannah / Lucy / Other) a shipment belongs to.
 
-        Always checks the recipient field first — this correctly routes shipments
-        that are stored in the 'Other' spreadsheet tab but whose recipient is Hannah
-        or Lucy (e.g. Customer Direct orders belonging to a specific rep).
-        For rows from a month tab (JAN / FEB / …), recipient is also used.
-        Falls back to 'Other' if nothing matches.
+        Uses SHEET_OWNERS to map the sheet token to a section name.
+        If the token isn't in SHEET_OWNERS, falls back to 'Other'.
         """
-        tab = r.get("tab", "").strip()
-        recipient = r.get("recipient", "").strip().title()  # e.g. "Hannah", "Lucy", "Other"
-
-        # Always check recipient first — it overrides the tab name.
-        # This ensures that rows in the "Other" spreadsheet tab but with a
-        # recipient of "Hannah" or "Lucy" land in the right section.
-        if recipient in PERMANENT_TABS:
-            return recipient
-
-        # For named-tab rows where recipient didn't match, use the tab itself.
-        if tab in PERMANENT_TABS:
-            return tab
-
-        return "Other"  # safe fallback
+        token = r.get("sheet_token", "").strip()
+        return SHEET_OWNERS.get(token, "Other")
 
     @staticmethod
     def _shipment_line(r: dict) -> str:
