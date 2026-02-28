@@ -238,18 +238,25 @@ class LarkClient:
     def _section_for(r: dict) -> str:
         """Determine which named section (Hannah / Lucy / Other) a shipment belongs to.
 
-        For rows from a named tab (Hannah / Lucy / Other), use the tab name directly.
-        For rows from a month tab (JAN / FEB / …), use the recipient field —
-        the recipient column records which named tab the order belongs to.
+        Always checks the recipient field first — this correctly routes shipments
+        that are stored in the 'Other' spreadsheet tab but whose recipient is Hannah
+        or Lucy (e.g. Customer Direct orders belonging to a specific rep).
+        For rows from a month tab (JAN / FEB / …), recipient is also used.
         Falls back to 'Other' if nothing matches.
         """
         tab = r.get("tab", "").strip()
-        if tab in PERMANENT_TABS:
-            return tab
-        # Month-tab row — route by recipient name
         recipient = r.get("recipient", "").strip().title()  # e.g. "Hannah", "Lucy", "Other"
+
+        # Always check recipient first — it overrides the tab name.
+        # This ensures that rows in the "Other" spreadsheet tab but with a
+        # recipient of "Hannah" or "Lucy" land in the right section.
         if recipient in PERMANENT_TABS:
             return recipient
+
+        # For named-tab rows where recipient didn't match, use the tab itself.
+        if tab in PERMANENT_TABS:
+            return tab
+
         return "Other"  # safe fallback
 
     @staticmethod
