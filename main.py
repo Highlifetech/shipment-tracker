@@ -17,7 +17,7 @@ import sys
 import logging
 import time
 from datetime import datetime
-from config import SHEET_TOKENS, CARRIER_ALIASES
+from config import SHEET_TOKENS, CARRIER_ALIASES, SHEET_OWNERS
 from lark_client import LarkClient
 from carriers import CarrierTracker
 
@@ -162,6 +162,7 @@ def main():
 
     scanning = sorted(tabs_to_scan())
     logger.info(f"Tabs to scan this run: {scanning}")
+      logger.info(f"SHEET_OWNERS mapping: {SHEET_OWNERS}")
 
     lark    = LarkClient()
     tracker = CarrierTracker()
