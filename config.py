@@ -30,6 +30,18 @@ SHEET_TOKENS = [
 ]
 
 # =============================================================================
+# SHEET OWNERS — maps each sheet token to a display section (Hannah/Lucy/Other)
+# =============================================================================
+# Format: "token1:Hannah,token2:Lucy"  (any token not listed falls to "Other")
+# Set via GitHub Secret: LARK_SHEET_OWNERS
+SHEET_OWNERS = {}
+for _entry in os.environ.get("LARK_SHEET_OWNERS", "").split(","):
+    _entry = _entry.strip()
+    if ":" in _entry:
+        _tok, _owner = _entry.split(":", 1)
+        SHEET_OWNERS[_tok.strip()] = _owner.strip()
+
+# =============================================================================
 # COLUMN MAPPING (letters A-Q)
 # =============================================================================
 COLUMNS = {
