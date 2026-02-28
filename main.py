@@ -162,7 +162,7 @@ def main():
 
     scanning = sorted(tabs_to_scan())
     logger.info(f"Tabs to scan this run: {scanning}")
-      logger.info(f"SHEET_OWNERS mapping: {SHEET_OWNERS}")
+          logger.info(f"SHEET_OWNERS mapping: {SHEET_OWNERS}")
 
     lark    = LarkClient()
     tracker = CarrierTracker()
