@@ -164,7 +164,8 @@ def main():
     logger.info(f"Tabs to scan this run: {scanning}")
     lark    = LarkClient()
     tracker = CarrierTracker()
-    
+
+  all_results = []
     for token in SHEET_TOKENS:
         logger.info(f"Processing spreadsheet: {token}")
         results = process_sheet(lark, tracker, token, dry_run)
