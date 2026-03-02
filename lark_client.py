@@ -5,10 +5,9 @@ Supports both scheduled runs and @mention triggers from Lark chat.
 
 Sheet structure note:
   Many shipment groups span multiple rows (one row per customer/order).
-  The Shipment ID, Tracking #, and Carrier columns are only filled on the
-  FIRST row of each group - sub-rows leave them blank and inherit the values
-  from the row above.  read_tracking_data() carries those fields forward so
-  every sub-row is tracked correctly.
+  The Shipment ID, Tracking #, Carrier, and Num Boxes columns are only filled
+  on the FIRST row of each group - sub-rows leave them blank and inherit the
+  values from the row above. read_tracking_data() carries those fields forward.
 """
 import json
 import logging
@@ -123,12 +122,12 @@ class LarkClient:
         MIN_COLS = 17
         results = []
 
-        # Carry-forward values for grouped/merged shipment rows.
-        # Many sheets fill Shipment ID, Tracking #, and Carrier only on the
-        # FIRST row of a group - sub-rows are blank and should inherit them.
+        # Carry-forward values: Shipment ID, Tracking #, Carrier, and Num Boxes
+        # are only filled on the FIRST row of a group; sub-rows inherit them.
         last_shipment_id = ""
         last_tracking = ""
         last_carrier = ""
+        last_num_boxes = ""
 
         for i, row in enumerate(rows):
             if not isinstance(row, list):
@@ -140,25 +139,30 @@ class LarkClient:
             shipment_id_raw = str(row[0] or "").strip()
             tracking_raw    = str(row[6] or "").strip()
             carrier_raw     = str(row[7] or "").strip()
+            num_boxes_raw   = str(row[14] or "").strip()   # col O
 
             # Apply carry-forward
             shipment_id = shipment_id_raw or last_shipment_id
             tracking    = tracking_raw    or last_tracking
             carrier     = carrier_raw     or last_carrier
+            num_boxes   = num_boxes_raw   or last_num_boxes
 
-            # Update carry-forward state whenever a non-blank value is seen
+            # Update carry-forward whenever a non-blank value appears
             if shipment_id_raw:
                 last_shipment_id = shipment_id_raw
             if tracking_raw:
                 last_tracking = tracking_raw
             if carrier_raw:
                 last_carrier = carrier_raw
+            if num_boxes_raw:
+                last_num_boxes = num_boxes_raw
 
-            # A fully blank row resets the carry-forward (new shipment group starts)
+            # A fully blank row resets carry-forward (next shipment group)
             if not any(str(c or "").strip() for c in row):
                 last_shipment_id = ""
                 last_tracking    = ""
                 last_carrier     = ""
+                last_num_boxes   = ""
                 continue
 
             # Skip rows with no tracking number even after carry-forward
@@ -185,6 +189,7 @@ class LarkClient:
                 "order_num":      str(row[3] or "").strip(),
                 "tracking_num":   tracking,
                 "carrier":        carrier,
+                "num_boxes":      num_boxes,
                 "current_status": status_raw,
                 "delivery_date":  delivery_raw,
             })
@@ -311,10 +316,11 @@ class LarkClient:
 
     @staticmethod
     def _shipment_line(r):
-        """Format one shipment line, including multi-box breakdown for UPS."""
+        """Format one shipment line. Shows box count from sheet and multi-box breakdown for UPS."""
         tracking  = r.get("tracking_num", "N/A")
         recipient = r.get("recipient", "").strip()
         customer  = r.get("customer", "").strip()
+        num_boxes = r.get("num_boxes", "").strip()
 
         if recipient.upper() == "BRENDAN":
             name = "Brendan"
@@ -323,12 +329,17 @@ class LarkClient:
         else:
             name = recipient or customer or "Unknown"
 
+        # Box count suffix from sheet column O
+        box_tag = f" [{num_boxes} boxes]" if num_boxes and num_boxes != "1" else ("")
+        if num_boxes == "1":
+            box_tag = " [1 box]"
+
         delivery = r.get("delivery_date", "").strip()
         status   = r.get("new_status", "").upper()
         raw      = r.get("raw_status", "").strip()
         packages = r.get("packages", [])
 
-        # ---- Multi-box summary ----
+        # ---- Multi-box UPS API breakdown (overrides simple box_tag) ----
         if packages:
             total     = len(packages)
             scanned   = [p for p in packages if p.get("scanned")]
@@ -353,7 +364,7 @@ class LarkClient:
             box_summary = ", ".join(parts) if parts else "in transit"
             return f"{tracking} ({total} boxes): {box_summary} -- {name}"
 
-        # ---- Single box ----
+        # ---- Single / sheet-defined box count ----
         if status == "OUT FOR DELIVERY":
             date_str = "out for delivery today"
         elif status == "LABEL CREATED":
@@ -367,7 +378,7 @@ class LarkClient:
         else:
             date_str = "in transit"
 
-        return f"{tracking} -- {name} -- {date_str}"
+        return f"{tracking}{box_tag} -- {name} -- {date_str}"
 
     def send_daily_summary(self, all_results, chat_id=None, message_id=None):
         """Send the shipment summary card to the Lark group chat."""
