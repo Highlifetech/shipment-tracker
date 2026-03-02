@@ -2,11 +2,14 @@ name: Shipment Tracking Bot
 
 on:
   schedule:
-    # 8:00 AM EST = 13:00 UTC
+    # 8:00 AM EST = 13:00 UTC  (full summary)
     - cron: '0 13 * * *'
-    # 8:00 PM EST = 01:00 UTC (next day)
+    # 8:00 PM EST = 01:00 UTC next day  (full summary)
     - cron: '0 1 * * *'
-  workflow_dispatch: # Allow manual trigger from GitHub UI
+    # Exception check every 30 min during business hours UTC 13:00-01:00
+    - cron: '*/30 13-23 * * *'
+    - cron: '*/30 0-1 * * *'
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
 
 jobs:
   track-shipments:
@@ -25,16 +28,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run tracking bot
+      - name: Run full tracking bot (8am / 8pm)
+        if: github.event.schedule == '0 13 * * *' || github.event.schedule == '0 1 * * *' || github.event_name == 'workflow_dispatch'
         env:
-          # Lark credentials
           LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
           LARK_BASE_URL: ${{ secrets.LARK_BASE_URL }}
           LARK_CHAT_ID: ${{ secrets.LARK_CHAT_ID }}
           LARK_SHEET_TOKENS: ${{ secrets.LARK_SHEET_TOKENS }}
           LARK_SHEET_OWNERS: ${{ secrets.LARK_SHEET_OWNERS }}
-          # Carrier API keys
           FEDEX_API_KEY: ${{ secrets.FEDEX_API_KEY }}
           FEDEX_SECRET_KEY: ${{ secrets.FEDEX_SECRET_KEY }}
           UPS_CLIENT_ID: ${{ secrets.UPS_CLIENT_ID }}
@@ -43,3 +45,22 @@ jobs:
           USPS_CLIENT_SECRET: ${{ secrets.USPS_CLIENT_SECRET }}
           DHL_API_KEY: ${{ secrets.DHL_API_KEY }}
         run: python main.py
+
+      - name: Run exception check (every 30 min)
+        if: github.event.schedule == '*/30 13-23 * * *' || github.event.schedule == '*/30 0-1 * * *'
+        env:
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
+          LARK_BASE_URL: ${{ secrets.LARK_BASE_URL }}
+          LARK_CHAT_ID: ${{ secrets.LARK_CHAT_ID }}
+          LARK_SHEET_TOKENS: ${{ secrets.LARK_SHEET_TOKENS }}
+          LARK_SHEET_OWNERS: ${{ secrets.LARK_SHEET_OWNERS }}
+          FEDEX_API_KEY: ${{ secrets.FEDEX_API_KEY }}
+          FEDEX_SECRET_KEY: ${{ secrets.FEDEX_SECRET_KEY }}
+          UPS_CLIENT_ID: ${{ secrets.UPS_CLIENT_ID }}
+          UPS_CLIENT_SECRET: ${{ secrets.UPS_CLIENT_SECRET }}
+          USPS_CLIENT_ID: ${{ secrets.USPS_CLIENT_ID }}
+          USPS_CLIENT_SECRET: ${{ secrets.USPS_CLIENT_SECRET }}
+          DHL_API_KEY: ${{ secrets.DHL_API_KEY }}
+          STATUS_CACHE_PATH: /tmp/shipment_status_cache.json
+        run: python main.py --check-exceptions
