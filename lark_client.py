@@ -135,19 +135,16 @@ class LarkClient:
             while len(row) < MIN_COLS:
                 row.append("")
 
-            # Raw cell values
             shipment_id_raw = str(row[0] or "").strip()
             tracking_raw    = str(row[6] or "").strip()
             carrier_raw     = str(row[7] or "").strip()
-            num_boxes_raw   = str(row[14] or "").strip()   # col O
+            num_boxes_raw   = str(row[14] or "").strip()
 
-            # Apply carry-forward
             shipment_id = shipment_id_raw or last_shipment_id
             tracking    = tracking_raw    or last_tracking
             carrier     = carrier_raw     or last_carrier
             num_boxes   = num_boxes_raw   or last_num_boxes
 
-            # Update carry-forward whenever a non-blank value appears
             if shipment_id_raw:
                 last_shipment_id = shipment_id_raw
             if tracking_raw:
@@ -157,7 +154,6 @@ class LarkClient:
             if num_boxes_raw:
                 last_num_boxes = num_boxes_raw
 
-            # A fully blank row resets carry-forward (next shipment group)
             if not any(str(c or "").strip() for c in row):
                 last_shipment_id = ""
                 last_tracking    = ""
@@ -165,11 +161,9 @@ class LarkClient:
                 last_num_boxes   = ""
                 continue
 
-            # Skip rows with no tracking number even after carry-forward
             if not tracking:
                 continue
 
-            # Skip rows with no carrier even after carry-forward
             if not carrier:
                 logger.warning(
                     "  Row %d: tracking=%s but no carrier (even after carry-forward) - skipping",
@@ -300,7 +294,6 @@ class LarkClient:
 
     @staticmethod
     def _format_date_short(raw_date):
-        """Convert YYYY-MM-DD to 'Mar 5' style."""
         if not raw_date:
             return ""
         try:
@@ -315,8 +308,23 @@ class LarkClient:
         return SHEET_OWNERS.get(token, "Other")
 
     @staticmethod
+    def _is_fully_delivered(r):
+        """Return True only when ALL boxes in a shipment are confirmed delivered."""
+        packages = r.get("packages", [])
+        status = r.get("new_status", "").upper()
+        if packages:
+            # Multi-box UPS: fully done only when every package is delivered
+            return all("DELIVERED" in p.get("status", "").upper() for p in packages)
+        # Single tracking: use the status written by the carrier API
+        return status == "DELIVERED"
+
+    @staticmethod
     def _shipment_line(r):
-        """Format one shipment line. Shows box count from sheet and multi-box breakdown for UPS."""
+        """
+        Format one shipment line.
+        - UPS multi-box: shows per-box delivered / in-transit / unscanned breakdown.
+        - Other carriers: shows box count from sheet col O plus status.
+        """
         tracking  = r.get("tracking_num", "N/A")
         recipient = r.get("recipient", "").strip()
         customer  = r.get("customer", "").strip()
@@ -329,43 +337,55 @@ class LarkClient:
         else:
             name = recipient or customer or "Unknown"
 
-        # Box count suffix from sheet column O
-        box_tag = f" [{num_boxes} boxes]" if num_boxes and num_boxes != "1" else ("")
-        if num_boxes == "1":
-            box_tag = " [1 box]"
-
         delivery = r.get("delivery_date", "").strip()
         status   = r.get("new_status", "").upper()
         raw      = r.get("raw_status", "").strip()
         packages = r.get("packages", [])
 
-        # ---- Multi-box UPS API breakdown (overrides simple box_tag) ----
+        # ---- UPS multi-box: detailed per-box breakdown ----
         if packages:
             total     = len(packages)
-            scanned   = [p for p in packages if p.get("scanned")]
-            unscanned = [p for p in packages if not p.get("scanned")]
             delivered = [p for p in packages if "DELIVERED" in p.get("status", "").upper()]
+            in_transit = [p for p in packages
+                          if p.get("scanned") and "DELIVERED" not in p.get("status", "").upper()]
+            unscanned = [p for p in packages if not p.get("scanned")]
 
-            date_groups = defaultdict(int)
-            for p in scanned:
-                if "DELIVERED" not in p.get("status", "").upper():
-                    d = p.get("delivery_date", "") or ""
-                    date_groups[d] += 1
+            n_del = len(delivered)
+            n_it  = len(in_transit)
+            n_uns = len(unscanned)
 
             parts = []
-            if delivered:
-                parts.append(f"{len(delivered)} delivered")
-            for date_str in sorted(date_groups):
-                count = date_groups[date_str]
-                label = LarkClient._format_date_short(date_str) if date_str else "no date"
-                parts.append(f"{count} arriving {label}")
-            if unscanned:
-                parts.append(f"{len(unscanned)} unscanned")
-            box_summary = ", ".join(parts) if parts else "in transit"
+            if n_del:
+                parts.append(f"{n_del} of {total} delivered")
+            if n_it:
+                # Group in-transit boxes by their expected delivery date
+                date_groups = defaultdict(int)
+                for p in in_transit:
+                    d = p.get("delivery_date", "") or ""
+                    date_groups[d] += 1
+                for date_str in sorted(date_groups):
+                    count = date_groups[date_str]
+                    label = LarkClient._format_date_short(date_str) if date_str else "no date"
+                    parts.append(f"{count} arriving {label}")
+            if n_uns:
+                parts.append(f"{n_uns} not yet scanned")
+            if not parts:
+                parts.append("in transit")
+
+            box_summary = ", ".join(parts)
             return f"{tracking} ({total} boxes): {box_summary} -- {name}"
 
         # ---- Single / sheet-defined box count ----
-        if status == "OUT FOR DELIVERY":
+        if num_boxes and num_boxes != "1":
+            box_tag = f" [{num_boxes} boxes]"
+        elif num_boxes == "1":
+            box_tag = " [1 box]"
+        else:
+            box_tag = ""
+
+        if status == "DELIVERED":
+            date_str = LarkClient._format_delivery_date(delivery) if delivery else "delivered"
+        elif status == "OUT FOR DELIVERY":
             date_str = "out for delivery today"
         elif status == "LABEL CREATED":
             date_str = "waiting to ship"
@@ -382,7 +402,10 @@ class LarkClient:
 
     def send_daily_summary(self, all_results, chat_id=None, message_id=None):
         """Send the shipment summary card to the Lark group chat."""
-        active = [r for r in all_results if r.get("new_status", "").upper() != "DELIVERED"]
+        # Include a shipment if it is NOT fully delivered.
+        # For UPS multi-box: keep it visible as long as at least one box is still moving.
+        active = [r for r in all_results if not LarkClient._is_fully_delivered(r)]
+
         if not active:
             self.send_group_message(
                 "All shipments delivered. Nothing to track.",
