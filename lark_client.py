@@ -4,11 +4,12 @@ Handles authentication, reading/writing Lark Sheets, and sending group chat mess
 Supports both scheduled runs and @mention triggers from Lark chat.
 
 Sheet structure note:
-  Many shipment groups span multiple rows (one row per customer/order).
-  The Shipment ID, Tracking #, Carrier, and Num Boxes columns are only filled
-  on the FIRST row of each group - sub-rows leave them blank and inherit the
-  values from the row above. read_tracking_data() carries those fields forward.
+    Many shipment groups span multiple rows (one row per customer/order).
+    The Shipment ID, Tracking #, Carrier, and Num Boxes columns are only filled
+    on the FIRST row of each group - sub-rows leave them blank and inherit the
+    values from the row above. read_tracking_data() carries those fields forward.
 """
+
 import json
 import logging
 from collections import defaultdict
@@ -72,15 +73,13 @@ class LarkClient:
             logger.error("v3 code=%s msg=%s token=%s", data.get("code"), data.get("msg"), spreadsheet_token)
         else:
             logger.error("v3 HTTP %s token=%s body=%s", resp.status_code, spreadsheet_token, resp.text[:200])
-
         url_v2 = f"{self.base_url}/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/metainfo"
         resp2 = requests.get(url_v2, headers=self._headers(), timeout=30)
         if resp2.ok:
             data2 = resp2.json()
             if data2.get("code") == 0:
                 sheets_raw = data2.get("data", {}).get("sheets", [])
-                sheets = [{"title": s.get("title", ""), "sheet_id": s.get("sheetId", "")}
-                          for s in sheets_raw]
+                sheets = [{"title": s.get("title", ""), "sheet_id": s.get("sheetId", "")} for s in sheets_raw]
                 return self._parse_sheets(sheets, spreadsheet_token)
             raise Exception(
                 f"Cannot read spreadsheet {spreadsheet_token}: "
@@ -101,8 +100,7 @@ class LarkClient:
     def read_sheet_range(self, spreadsheet_token, sheet_id, start_col, end_col, start_row, end_row):
         range_str = f"{sheet_id}!{start_col}{start_row}:{end_col}{end_row}"
         url = f"{self.base_url}/open-apis/sheets/v2/spreadsheets/{spreadsheet_token}/values/{range_str}"
-        resp = requests.get(url, headers=self._headers(),
-                            params={"valueRenderOption": "ToString"}, timeout=30)
+        resp = requests.get(url, headers=self._headers(), params={"valueRenderOption": "ToString"}, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
@@ -118,12 +116,8 @@ class LarkClient:
             start_col="A", end_col="Q",
             start_row=start_row, end_row=500,
         )
-
         MIN_COLS = 17
         results = []
-
-        # Carry-forward values: Shipment ID, Tracking #, Carrier, and Num Boxes
-        # are only filled on the FIRST row of a group; sub-rows inherit them.
         last_shipment_id = ""
         last_tracking = ""
         last_carrier = ""
@@ -136,14 +130,14 @@ class LarkClient:
                 row.append("")
 
             shipment_id_raw = str(row[0] or "").strip()
-            tracking_raw    = str(row[6] or "").strip()
-            carrier_raw     = str(row[7] or "").strip()
-            num_boxes_raw   = str(row[14] or "").strip()
+            tracking_raw = str(row[6] or "").strip()
+            carrier_raw = str(row[7] or "").strip()
+            num_boxes_raw = str(row[14] or "").strip()
 
             shipment_id = shipment_id_raw or last_shipment_id
-            tracking    = tracking_raw    or last_tracking
-            carrier     = carrier_raw     or last_carrier
-            num_boxes   = num_boxes_raw   or last_num_boxes
+            tracking = tracking_raw or last_tracking
+            carrier = carrier_raw or last_carrier
+            num_boxes = num_boxes_raw or last_num_boxes
 
             if shipment_id_raw:
                 last_shipment_id = shipment_id_raw
@@ -156,14 +150,13 @@ class LarkClient:
 
             if not any(str(c or "").strip() for c in row):
                 last_shipment_id = ""
-                last_tracking    = ""
-                last_carrier     = ""
-                last_num_boxes   = ""
+                last_tracking = ""
+                last_carrier = ""
+                last_num_boxes = ""
                 continue
 
             if not tracking:
                 continue
-
             if not carrier:
                 logger.warning(
                     "  Row %d: tracking=%s but no carrier (even after carry-forward) - skipping",
@@ -171,21 +164,21 @@ class LarkClient:
                 )
                 continue
 
-            status_raw   = str(row[12] or "").strip()
+            status_raw = str(row[12] or "").strip()
             delivery_raw = str(row[16] or "").strip()
 
             results.append({
-                "row_num":        start_row + i,
-                "shipment_id":    shipment_id,
-                "vendor":         str(row[1] or "").strip(),
-                "recipient":      str(row[2] or "").strip(),
-                "customer":       str(row[4] or "").strip(),
-                "order_num":      str(row[3] or "").strip(),
-                "tracking_num":   tracking,
-                "carrier":        carrier,
-                "num_boxes":      num_boxes,
+                "row_num": start_row + i,
+                "shipment_id": shipment_id,
+                "vendor": str(row[1] or "").strip(),
+                "recipient": str(row[2] or "").strip(),
+                "customer": str(row[4] or "").strip(),
+                "order_num": str(row[3] or "").strip(),
+                "tracking_num": tracking,
+                "carrier": carrier,
+                "num_boxes": num_boxes,
                 "current_status": status_raw,
-                "delivery_date":  delivery_raw,
+                "delivery_date": delivery_raw,
             })
 
         logger.info("  %d rows with tracking in sheet %s", len(results), sheet_id)
@@ -200,8 +193,7 @@ class LarkClient:
             value_ranges.append({"range": range_str, "values": [[u["value"]]]})
         url = (f"{self.base_url}/open-apis/sheets/v2/spreadsheets/"
                f"{spreadsheet_token}/values_batch_update")
-        resp = requests.post(url, headers=self._headers(),
-                             json={"valueRanges": value_ranges}, timeout=30)
+        resp = requests.post(url, headers=self._headers(), json={"valueRanges": value_ranges}, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         if data.get("code") != 0:
@@ -231,18 +223,19 @@ class LarkClient:
             logger.error("Plain text message also failed: %s", e)
             raise
 
-    def _send_card(self, message, chat_id, message_id=None):
+    def _send_card(self, message, chat_id, message_id=None, card_json=None):
         url = f"{self.base_url}/open-apis/im/v1/messages"
         params = {"receive_id_type": "chat_id"}
+        content = card_json if card_json else self._build_card_message(message)
         body = {
             "receive_id": chat_id,
             "msg_type": "interactive",
-            "content": self._build_card_message(message),
+            "content": content,
         }
         if message_id:
             url = f"{self.base_url}/open-apis/im/v1/messages/{message_id}/reply"
             params = {}
-            body = {"msg_type": "interactive", "content": self._build_card_message(message)}
+            body = {"msg_type": "interactive", "content": content}
         resp = requests.post(url, headers=self._headers(), params=params, json=body, timeout=30)
         resp.raise_for_status()
         data = resp.json()
@@ -275,6 +268,18 @@ class LarkClient:
             "header": {
                 "title": {"tag": "plain_text", "content": "HLT Shipment Update"},
                 "template": "blue",
+            },
+            "elements": [{"tag": "markdown", "content": text_content}],
+        }
+        return json.dumps(card)
+
+    def _build_alert_card(self, text_content):
+        """Red-banner card used for exception alerts."""
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "Shipment Alert"},
+                "template": "red",
             },
             "elements": [{"tag": "markdown", "content": text_content}],
         }
@@ -313,9 +318,7 @@ class LarkClient:
         packages = r.get("packages", [])
         status = r.get("new_status", "").upper()
         if packages:
-            # Multi-box UPS: fully done only when every package is delivered
             return all("DELIVERED" in p.get("status", "").upper() for p in packages)
-        # Single tracking: use the status written by the carrier API
         return status == "DELIVERED"
 
     @staticmethod
@@ -325,9 +328,9 @@ class LarkClient:
         - UPS multi-box: shows per-box delivered / in-transit / unscanned breakdown.
         - Other carriers: shows box count from sheet col O plus status.
         """
-        tracking  = r.get("tracking_num", "N/A")
+        tracking = r.get("tracking_num", "N/A")
         recipient = r.get("recipient", "").strip()
-        customer  = r.get("customer", "").strip()
+        customer = r.get("customer", "").strip()
         num_boxes = r.get("num_boxes", "").strip()
 
         if recipient.upper() == "BRENDAN":
@@ -338,27 +341,25 @@ class LarkClient:
             name = recipient or customer or "Unknown"
 
         delivery = r.get("delivery_date", "").strip()
-        status   = r.get("new_status", "").upper()
-        raw      = r.get("raw_status", "").strip()
+        status = r.get("new_status", "").upper()
+        raw = r.get("raw_status", "").strip()
         packages = r.get("packages", [])
 
         # ---- UPS multi-box: detailed per-box breakdown ----
         if packages:
-            total     = len(packages)
+            total = len(packages)
             delivered = [p for p in packages if "DELIVERED" in p.get("status", "").upper()]
-            in_transit = [p for p in packages
-                          if p.get("scanned") and "DELIVERED" not in p.get("status", "").upper()]
+            in_transit = [p for p in packages if p.get("scanned") and "DELIVERED" not in p.get("status", "").upper()]
             unscanned = [p for p in packages if not p.get("scanned")]
 
             n_del = len(delivered)
-            n_it  = len(in_transit)
+            n_it = len(in_transit)
             n_uns = len(unscanned)
 
             parts = []
             if n_del:
                 parts.append(f"{n_del} of {total} delivered")
             if n_it:
-                # Group in-transit boxes by their expected delivery date
                 date_groups = defaultdict(int)
                 for p in in_transit:
                     d = p.get("delivery_date", "") or ""
@@ -402,8 +403,6 @@ class LarkClient:
 
     def send_daily_summary(self, all_results, chat_id=None, message_id=None):
         """Send the shipment summary card to the Lark group chat."""
-        # Include a shipment if it is NOT fully delivered.
-        # For UPS multi-box: keep it visible as long as at least one box is still moving.
         active = [r for r in all_results if not LarkClient._is_fully_delivered(r)]
 
         if not active:
@@ -451,3 +450,50 @@ class LarkClient:
             chat_id=chat_id,
             message_id=message_id,
         )
+
+    def send_exception_alerts(self, alerts, chat_id=None):
+        """
+        Send a red-banner alert card for newly detected shipping exceptions.
+        alerts: list of dicts with keys: tracking_num, carrier, name, tab,
+                new_status, raw_status, prev_status, (optional) parent_tracking
+        """
+        target_chat = chat_id or LARK_CHAT_ID
+        if not target_chat:
+            logger.warning("No chat_id configured, skipping exception alerts")
+            return
+
+        NL = chr(10)
+        lines = ["**HLT Shipment Alert**", NL + "The following shipments need attention:"]
+
+        for a in alerts:
+            tracking = a.get("tracking_num", "N/A")
+            carrier = a.get("carrier", "")
+            name = a.get("name", "")
+            tab = a.get("tab", "")
+            raw = a.get("raw_status", "").strip()
+            parent = a.get("parent_tracking", "")
+
+            if raw:
+                detail = raw
+            else:
+                detail = a.get("new_status", "").title()
+
+            if parent:
+                line = f"- **{carrier}** {tracking} (part of {parent}) -- {name} [{tab}]: {detail}"
+            else:
+                line = f"- **{carrier}** {tracking} -- {name} [{tab}]: {detail}"
+
+            lines.append(line)
+
+        message = NL.join(lines)
+        alert_card = self._build_alert_card(message)
+
+        try:
+            self._send_card("", target_chat, card_json=alert_card)
+            logger.info("Exception alert card sent (%d alerts)", len(alerts))
+        except Exception as e:
+            logger.warning("Alert card failed (%s), sending as plain text", e)
+            try:
+                self._send_text(message, target_chat)
+            except Exception as e2:
+                logger.error("Exception alert plain text also failed: %s", e2)
