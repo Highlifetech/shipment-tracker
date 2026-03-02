@@ -2,6 +2,13 @@
 Lark API Client
 Handles authentication, reading/writing Lark Sheets, and sending group chat messages.
 Supports both scheduled runs and @mention triggers from Lark chat.
+
+Sheet structure note:
+  Many shipment groups span multiple rows (one row per customer/order).
+  The Shipment ID, Tracking #, and Carrier columns are only filled on the
+  FIRST row of each group - sub-rows leave them blank and inherit the values
+  from the row above.  read_tracking_data() carries those fields forward so
+  every sub-row is tracked correctly.
 """
 import json
 import logging
@@ -112,35 +119,76 @@ class LarkClient:
             start_col="A", end_col="Q",
             start_row=start_row, end_row=500,
         )
+
         MIN_COLS = 17
         results = []
+
+        # Carry-forward values for grouped/merged shipment rows.
+        # Many sheets fill Shipment ID, Tracking #, and Carrier only on the
+        # FIRST row of a group - sub-rows are blank and should inherit them.
+        last_shipment_id = ""
+        last_tracking = ""
+        last_carrier = ""
+
         for i, row in enumerate(rows):
             if not isinstance(row, list):
                 continue
             while len(row) < MIN_COLS:
                 row.append("")
-            tracking = str(row[6] or "").strip()
+
+            # Raw cell values
+            shipment_id_raw = str(row[0] or "").strip()
+            tracking_raw    = str(row[6] or "").strip()
+            carrier_raw     = str(row[7] or "").strip()
+
+            # Apply carry-forward
+            shipment_id = shipment_id_raw or last_shipment_id
+            tracking    = tracking_raw    or last_tracking
+            carrier     = carrier_raw     or last_carrier
+
+            # Update carry-forward state whenever a non-blank value is seen
+            if shipment_id_raw:
+                last_shipment_id = shipment_id_raw
+            if tracking_raw:
+                last_tracking = tracking_raw
+            if carrier_raw:
+                last_carrier = carrier_raw
+
+            # A fully blank row resets the carry-forward (new shipment group starts)
+            if not any(str(c or "").strip() for c in row):
+                last_shipment_id = ""
+                last_tracking    = ""
+                last_carrier     = ""
+                continue
+
+            # Skip rows with no tracking number even after carry-forward
             if not tracking:
                 continue
-            carrier_raw = str(row[7] or "").strip()
-            status_raw = str(row[12] or "").strip()
-            delivery_raw = str(row[16] or "").strip()
-            if not carrier_raw:
-                logger.warning("  Row %d: tracking=%s but carrier is empty - skipping",
-                               start_row + i, tracking)
+
+            # Skip rows with no carrier even after carry-forward
+            if not carrier:
+                logger.warning(
+                    "  Row %d: tracking=%s but no carrier (even after carry-forward) - skipping",
+                    start_row + i, tracking,
+                )
                 continue
+
+            status_raw   = str(row[12] or "").strip()
+            delivery_raw = str(row[16] or "").strip()
+
             results.append({
-                "row_num": start_row + i,
-                "shipment_id": str(row[0] or "").strip(),
-                "vendor": str(row[1] or "").strip(),
-                "recipient": str(row[2] or "").strip(),
-                "customer": str(row[4] or "").strip(),
-                "order_num": str(row[3] or "").strip(),
-                "tracking_num": tracking,
-                "carrier": carrier_raw,
+                "row_num":        start_row + i,
+                "shipment_id":    shipment_id,
+                "vendor":         str(row[1] or "").strip(),
+                "recipient":      str(row[2] or "").strip(),
+                "customer":       str(row[4] or "").strip(),
+                "order_num":      str(row[3] or "").strip(),
+                "tracking_num":   tracking,
+                "carrier":        carrier,
                 "current_status": status_raw,
-                "delivery_date": delivery_raw,
+                "delivery_date":  delivery_raw,
             })
+
         logger.info("  %d rows with tracking in sheet %s", len(results), sheet_id)
         return results
 
@@ -264,9 +312,9 @@ class LarkClient:
     @staticmethod
     def _shipment_line(r):
         """Format one shipment line, including multi-box breakdown for UPS."""
-        tracking = r.get("tracking_num", "N/A")
+        tracking  = r.get("tracking_num", "N/A")
         recipient = r.get("recipient", "").strip()
-        customer = r.get("customer", "").strip()
+        customer  = r.get("customer", "").strip()
 
         if recipient.upper() == "BRENDAN":
             name = "Brendan"
@@ -276,18 +324,17 @@ class LarkClient:
             name = recipient or customer or "Unknown"
 
         delivery = r.get("delivery_date", "").strip()
-        status = r.get("new_status", "").upper()
-        raw = r.get("raw_status", "").strip()
+        status   = r.get("new_status", "").upper()
+        raw      = r.get("raw_status", "").strip()
         packages = r.get("packages", [])
 
         # ---- Multi-box summary ----
         if packages:
-            total = len(packages)
-            scanned = [p for p in packages if p.get("scanned")]
+            total     = len(packages)
+            scanned   = [p for p in packages if p.get("scanned")]
             unscanned = [p for p in packages if not p.get("scanned")]
             delivered = [p for p in packages if "DELIVERED" in p.get("status", "").upper()]
 
-            # Group scanned (non-delivered) by delivery date
             date_groups = defaultdict(int)
             for p in scanned:
                 if "DELIVERED" not in p.get("status", "").upper():
@@ -303,7 +350,6 @@ class LarkClient:
                 parts.append(f"{count} arriving {label}")
             if unscanned:
                 parts.append(f"{len(unscanned)} unscanned")
-
             box_summary = ", ".join(parts) if parts else "in transit"
             return f"{tracking} ({total} boxes): {box_summary} -- {name}"
 
@@ -329,7 +375,8 @@ class LarkClient:
         if not active:
             self.send_group_message(
                 "All shipments delivered. Nothing to track.",
-                chat_id=chat_id, message_id=message_id,
+                chat_id=chat_id,
+                message_id=message_id,
             )
             return
 
@@ -348,7 +395,8 @@ class LarkClient:
         lines = ["**HLT Shipment Tracker**"]
 
         def render_section(label, items):
-            lines.append(f"\n**-- {label} --**")
+            lines.append(f"
+**-- {label} --**")
             if not items:
                 lines.append("No active shipments")
                 return
@@ -357,7 +405,8 @@ class LarkClient:
                 c = r.get("carrier", "").strip().upper() or "UNKNOWN"
                 by_carrier.setdefault(c, []).append(r)
             for carrier in sorted(by_carrier):
-                lines.append(f"\n*{carrier}*")
+                lines.append(f"
+*{carrier}*")
                 for r in by_carrier[carrier]:
                     lines.append(LarkClient._shipment_line(r))
 
@@ -365,7 +414,8 @@ class LarkClient:
             render_section(tab_name, buckets[tab_name])
 
         self.send_group_message(
-            "\n".join(lines),
+            "
+".join(lines),
             chat_id=chat_id,
             message_id=message_id,
         )
