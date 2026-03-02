@@ -6,20 +6,27 @@ Scans the following tabs in each spreadsheet:
   - Current month tab - e.g. MAR
   - Previous month tab - e.g. FEB (catches end-of-month layover)
 
-DELIVERED rows are skipped individually so layover shipments from the
-previous month that are still in transit will still appear.
+DELIVERED rows are skipped individually so layover shipments from the previous
+month that are still in transit will still appear.
 
 Multi-piece UPS shipments: when one tracking number in the sheet belongs
 to a multi-box shipment, the UPS API returns all sibling tracking numbers.
 We consolidate those siblings so that only ONE summary line is shown per
 shipment (e.g. "1ZHE... (5 boxes): 3 arriving Mar 5, 2 unscanned").
 
+Exception Alerts: When run with --check-exceptions, compares current carrier
+status to the last known status stored in /tmp/shipment_status_cache.json.
+If a new exception/delay is detected, fires an immediate alert to the chat.
+
 Usage:
-    python main.py            # Run once
-    python main.py --dry-run  # No writes or messages
+    python main.py                     # Run once (full summary)
+    python main.py --dry-run           # No writes or messages
+    python main.py --check-exceptions  # Alert-only: fires only if new issues found
 """
 
 import sys
+import json
+import os
 import logging
 import time
 from datetime import datetime
@@ -41,6 +48,9 @@ MONTH_NAMES = [
 BAD_STATUSES = {"UNKNOWN", "NOT FOUND", ""}
 DONE_STATUSES = {"DELIVERED"}
 
+# Where we store last-known statuses between runs
+STATUS_CACHE_PATH = os.environ.get("STATUS_CACHE_PATH", "/tmp/shipment_status_cache.json")
+
 
 def normalize_carrier(carrier_str):
     return CARRIER_ALIASES.get(carrier_str.lower().strip(), carrier_str.lower().strip())
@@ -53,6 +63,56 @@ def tabs_to_scan():
     return PERMANENT_TABS | {current, previous}
 
 
+def load_status_cache():
+    """Load last-known statuses from cache file."""
+    try:
+        if os.path.exists(STATUS_CACHE_PATH):
+            with open(STATUS_CACHE_PATH, "r") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.warning("Could not load status cache: %s", e)
+    return {}
+
+
+def save_status_cache(cache):
+    """Save current statuses to cache file."""
+    try:
+        with open(STATUS_CACHE_PATH, "w") as f:
+            json.dump(cache, f, indent=2)
+        logger.info("Status cache saved (%d entries)", len(cache))
+    except Exception as e:
+        logger.warning("Could not save status cache: %s", e)
+
+
+def is_exception_status(status_str, raw_status=""):
+    """Return True if the status string indicates a new problem."""
+    s = status_str.upper()
+    r = raw_status.upper()
+    if "EXCEPTION" in s or "EXCEPTION" in r:
+        return True
+    if "DELAY" in s or "DELAY" in r:
+        return True
+    if "CLEARANCE" in r:
+        return True
+    if "IMPORT C.O.D" in r:
+        return True
+    if "CUSTOMS" in r:
+        return True
+    if "HELD" in r:
+        return True
+    if "GOVERNMENT AGENCY" in r:
+        return True
+    if "PROOF OF VALUE" in r:
+        return True
+    if "RETURNED" in r:
+        return True
+    if "REFUSED" in r:
+        return True
+    if "ADDRESS" in r and "CORRECTED" in r:
+        return True
+    return False
+
+
 def process_sheet(lark, tracker, spreadsheet_token, dry_run=False):
     all_results = []
     try:
@@ -63,6 +123,7 @@ def process_sheet(lark, tracker, spreadsheet_token, dry_run=False):
 
     target_tabs = tabs_to_scan()
     tabs_to_process = [t for t in tabs if t["title"] in target_tabs]
+
     if not tabs_to_process:
         logger.warning(
             "No matching tabs in %s. Want: %s. Have: %s",
@@ -81,11 +142,13 @@ def process_sheet(lark, tracker, spreadsheet_token, dry_run=False):
         tab_title = tab["title"]
         sheet_id = tab["sheet_id"]
         logger.info("  Tab: %s (%s)", tab_title, sheet_id)
+
         try:
             rows = lark.read_tracking_data(spreadsheet_token, sheet_id)
         except Exception as e:
             logger.error("  Failed to read tab '%s': %s", tab_title, e)
             continue
+
         logger.info("  %d rows with tracking in '%s'", len(rows), tab_title)
 
         for row in rows:
@@ -129,7 +192,9 @@ def process_sheet(lark, tracker, spreadsheet_token, dry_run=False):
                         sibling_skip.add(sib)
                 logger.info(
                     "  %s is a %d-box shipment; registered %d siblings to skip",
-                    tracking_num, len(packages), len(packages) - 1,
+                    tracking_num,
+                    len(packages),
+                    len(packages) - 1,
                 )
 
             if api_error or new_status.upper() in BAD_STATUSES:
@@ -167,6 +232,7 @@ def process_sheet(lark, tracker, spreadsheet_token, dry_run=False):
                         )
                     except Exception as e:
                         logger.error("  Failed to write row %d: %s", row["row_num"], e)
+
                 all_results.append({
                     **row,
                     "new_status": new_status,
@@ -188,6 +254,7 @@ def run_tracker(dry_run=False, chat_id=None, message_id=None):
         return []
 
     logger.info("Tabs to scan: %s", sorted(tabs_to_scan()))
+
     lark = LarkClient()
     tracker = CarrierTracker()
     all_results = []
@@ -228,10 +295,163 @@ def run_tracker(dry_run=False, chat_id=None, message_id=None):
     return all_results
 
 
+def run_exception_check():
+    """
+    Exception-alert-only run. Checks all shipments every 30 min.
+    Compares current status to last known status stored in cache.
+    Only sends a Lark alert if a NEW exception or delay is detected.
+    Does not send the full summary - only fires for problems.
+    """
+    if not SHEET_TOKENS:
+        logger.error("No sheet tokens configured.")
+        return
+
+    logger.info("=== EXCEPTION CHECK MODE ===")
+    cache = load_status_cache()
+
+    lark = LarkClient()
+    tracker = CarrierTracker()
+    alerts = []
+    sibling_skip = set()
+
+    for token in SHEET_TOKENS:
+        try:
+            tabs = lark.get_sheet_metadata(token)
+        except Exception as e:
+            logger.error("Failed to read spreadsheet %s: %s", token, e)
+            continue
+
+        target_tabs = tabs_to_scan()
+        tabs_to_process = [t for t in tabs if t["title"] in target_tabs]
+
+        for tab in tabs_to_process:
+            tab_title = tab["title"]
+            sheet_id = tab["sheet_id"]
+
+            try:
+                rows = lark.read_tracking_data(token, sheet_id)
+            except Exception as e:
+                logger.error("  Failed to read tab '%s': %s", tab_title, e)
+                continue
+
+            for row in rows:
+                tracking_num = row["tracking_num"]
+                current_status = row.get("current_status", "").strip().upper()
+
+                if current_status in DONE_STATUSES:
+                    continue
+                if tracking_num in sibling_skip:
+                    continue
+
+                carrier_raw = row["carrier"]
+                carrier = normalize_carrier(carrier_raw)
+                if not carrier or carrier not in CARRIER_ALIASES.values():
+                    continue
+
+                result = tracker.track(tracking_num, carrier)
+                new_status = result["status"].upper()
+                raw_status = result.get("raw_status", "")
+                api_error = result.get("error", "")
+                packages = result.get("packages", [])
+
+                # Register siblings
+                if packages:
+                    for pkg in packages:
+                        sib = pkg.get("tracking_num", "").strip()
+                        if sib and sib != tracking_num:
+                            sibling_skip.add(sib)
+
+                if api_error or new_status in BAD_STATUSES:
+                    time.sleep(0.5)
+                    continue
+
+                cache_key = tracking_num
+                last_status = cache.get(cache_key, {}).get("status", "")
+                last_raw = cache.get(cache_key, {}).get("raw_status", "")
+
+                # Detect NEW exception (status or raw message changed to a problem)
+                status_changed = new_status != last_status
+                raw_changed = raw_status != last_raw
+
+                if (status_changed or raw_changed) and is_exception_status(new_status, raw_status):
+                    recipient = row.get("recipient", "").strip()
+                    customer = row.get("customer", "").strip()
+                    if recipient.upper() == "CUSTOMER DIRECT":
+                        name = customer or "Unknown"
+                    else:
+                        name = recipient or customer or "Unknown"
+
+                    alerts.append({
+                        "tracking_num": tracking_num,
+                        "carrier": carrier_raw.upper(),
+                        "name": name,
+                        "tab": tab_title,
+                        "new_status": new_status,
+                        "raw_status": raw_status,
+                        "prev_status": last_status,
+                    })
+                    logger.warning(
+                        "NEW EXCEPTION on %s (%s): %s -> %s | %s",
+                        tracking_num, carrier_raw, last_status, new_status, raw_status
+                    )
+
+                # Check package-level exceptions for multi-box UPS
+                if packages:
+                    for pkg in packages:
+                        pkg_tn = pkg.get("tracking_num", "")
+                        pkg_status = pkg.get("status", "").upper()
+                        pkg_cache_key = pkg_tn
+                        last_pkg_status = cache.get(pkg_cache_key, {}).get("status", "")
+                        if pkg_status != last_pkg_status and is_exception_status(pkg_status):
+                            recipient = row.get("recipient", "").strip()
+                            customer = row.get("customer", "").strip()
+                            if recipient.upper() == "CUSTOMER DIRECT":
+                                name = customer or "Unknown"
+                            else:
+                                name = recipient or customer or "Unknown"
+                            alerts.append({
+                                "tracking_num": pkg_tn,
+                                "carrier": "UPS",
+                                "name": name,
+                                "tab": tab_title,
+                                "new_status": pkg_status,
+                                "raw_status": "",
+                                "prev_status": last_pkg_status,
+                                "parent_tracking": tracking_num,
+                            })
+                            logger.warning(
+                                "NEW EXCEPTION on UPS sibling %s: %s -> %s",
+                                pkg_tn, last_pkg_status, pkg_status
+                            )
+                        cache[pkg_cache_key] = {"status": pkg_status, "raw_status": ""}
+
+                # Update cache
+                cache[cache_key] = {"status": new_status, "raw_status": raw_status}
+                time.sleep(0.5)
+
+    # Save updated cache
+    save_status_cache(cache)
+
+    # Send alerts if any
+    if alerts:
+        logger.info("Sending %d exception alert(s) to Lark", len(alerts))
+        lark.send_exception_alerts(alerts)
+    else:
+        logger.info("No new exceptions detected. No alert sent.")
+
+
 def main():
     dry_run = "--dry-run" in sys.argv
+    check_exceptions = "--check-exceptions" in sys.argv
+
+    if check_exceptions:
+        run_exception_check()
+        logger.info("Exception check done!")
+        return
+
     if dry_run:
         logger.info("=== DRY RUN MODE - no writes or messages ===")
+
     run_tracker(dry_run=dry_run)
     logger.info("Done!")
 
