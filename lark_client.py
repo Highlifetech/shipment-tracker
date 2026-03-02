@@ -5,6 +5,7 @@ Supports both scheduled runs and @mention triggers from Lark chat.
 """
 import json
 import logging
+from collections import defaultdict
 from datetime import datetime
 import time
 import requests
@@ -105,10 +106,6 @@ class LarkClient:
         return rows
 
     def read_tracking_data(self, spreadsheet_token, sheet_id):
-        """Read all rows with tracking data. Column layout (0-indexed, A-Q):
-        A=0 shipment_id, B=1 vendor, C=2 recipient, D=3 order_num, E=4 customer,
-        F=5 photo, G=6 tracking_num, H=7 carrier, M=12 status, Q=16 delivery_date
-        """
         start_row = HEADER_ROW + 1
         rows = self.read_sheet_range(
             spreadsheet_token, sheet_id,
@@ -122,20 +119,16 @@ class LarkClient:
                 continue
             while len(row) < MIN_COLS:
                 row.append("")
-
             tracking = str(row[6] or "").strip()
             if not tracking:
                 continue
-
             carrier_raw = str(row[7] or "").strip()
             status_raw = str(row[12] or "").strip()
             delivery_raw = str(row[16] or "").strip()
-
             if not carrier_raw:
                 logger.warning("  Row %d: tracking=%s but carrier is empty - skipping",
                                start_row + i, tracking)
                 continue
-
             results.append({
                 "row_num": start_row + i,
                 "shipment_id": str(row[0] or "").strip(),
@@ -148,7 +141,6 @@ class LarkClient:
                 "current_status": status_raw,
                 "delivery_date": delivery_raw,
             })
-
         logger.info("  %d rows with tracking in sheet %s", len(results), sheet_id)
         return results
 
@@ -254,12 +246,24 @@ class LarkClient:
         return raw_date
 
     @staticmethod
+    def _format_date_short(raw_date):
+        """Convert YYYY-MM-DD to 'Mar 5' style."""
+        if not raw_date:
+            return ""
+        try:
+            dt = datetime.strptime(raw_date[:10], "%Y-%m-%d")
+            return dt.strftime("%b %-d")
+        except Exception:
+            return raw_date
+
+    @staticmethod
     def _section_for(r):
         token = r.get("sheet_token", "").strip()
         return SHEET_OWNERS.get(token, "Other")
 
     @staticmethod
     def _shipment_line(r):
+        """Format one shipment line, including multi-box breakdown for UPS."""
         tracking = r.get("tracking_num", "N/A")
         recipient = r.get("recipient", "").strip()
         customer = r.get("customer", "").strip()
@@ -274,7 +278,36 @@ class LarkClient:
         delivery = r.get("delivery_date", "").strip()
         status = r.get("new_status", "").upper()
         raw = r.get("raw_status", "").strip()
+        packages = r.get("packages", [])
 
+        # ---- Multi-box summary ----
+        if packages:
+            total = len(packages)
+            scanned = [p for p in packages if p.get("scanned")]
+            unscanned = [p for p in packages if not p.get("scanned")]
+            delivered = [p for p in packages if "DELIVERED" in p.get("status", "").upper()]
+
+            # Group scanned (non-delivered) by delivery date
+            date_groups = defaultdict(int)
+            for p in scanned:
+                if "DELIVERED" not in p.get("status", "").upper():
+                    d = p.get("delivery_date", "") or ""
+                    date_groups[d] += 1
+
+            parts = []
+            if delivered:
+                parts.append(f"{len(delivered)} delivered")
+            for date_str in sorted(date_groups):
+                count = date_groups[date_str]
+                label = LarkClient._format_date_short(date_str) if date_str else "no date"
+                parts.append(f"{count} arriving {label}")
+            if unscanned:
+                parts.append(f"{len(unscanned)} unscanned")
+
+            box_summary = ", ".join(parts) if parts else "in transit"
+            return f"{tracking} ({total} boxes): {box_summary} -- {name}"
+
+        # ---- Single box ----
         if status == "OUT FOR DELIVERY":
             date_str = "out for delivery today"
         elif status == "LABEL CREATED":
@@ -291,7 +324,7 @@ class LarkClient:
         return f"{tracking} -- {name} -- {date_str}"
 
     def send_daily_summary(self, all_results, chat_id=None, message_id=None):
-        """Send the shipment summary. Works for scheduled runs and @mention replies."""
+        """Send the shipment summary card to the Lark group chat."""
         active = [r for r in all_results if r.get("new_status", "").upper() != "DELIVERED"]
         if not active:
             self.send_group_message(
