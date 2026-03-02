@@ -392,11 +392,11 @@ class LarkClient:
             section = self._section_for(r)
             buckets[section].append(r)
 
+        NL = chr(10)
         lines = ["**HLT Shipment Tracker**"]
 
         def render_section(label, items):
-            lines.append(f"
-**-- {label} --**")
+            lines.append(NL + f"**-- {label} --**")
             if not items:
                 lines.append("No active shipments")
                 return
@@ -405,8 +405,7 @@ class LarkClient:
                 c = r.get("carrier", "").strip().upper() or "UNKNOWN"
                 by_carrier.setdefault(c, []).append(r)
             for carrier in sorted(by_carrier):
-                lines.append(f"
-*{carrier}*")
+                lines.append(NL + f"*{carrier}*")
                 for r in by_carrier[carrier]:
                     lines.append(LarkClient._shipment_line(r))
 
@@ -414,8 +413,7 @@ class LarkClient:
             render_section(tab_name, buckets[tab_name])
 
         self.send_group_message(
-            "
-".join(lines),
+            NL.join(lines),
             chat_id=chat_id,
             message_id=message_id,
         )
