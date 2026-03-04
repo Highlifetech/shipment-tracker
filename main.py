@@ -295,7 +295,7 @@ def run_tracker(dry_run=False, chat_id=None, message_id=None):
     return all_results
 
 
-def run_exception_check():
+def run_exception_check(external_cache=None):
     """
     Exception-alert-only run. Checks all shipments every 30 min.
     Compares current status to last known status stored in cache.
@@ -307,7 +307,7 @@ def run_exception_check():
         return
 
     logger.info("=== EXCEPTION CHECK MODE ===")
-    cache = load_status_cache()
+        cache = external_cache if external_cache is not None else load_status_cache()
 
     lark = LarkClient()
     tracker = CarrierTracker()
@@ -430,7 +430,8 @@ def run_exception_check():
                 time.sleep(0.5)
 
     # Save updated cache
-    save_status_cache(cache)
+        if external_cache is None:
+                  save_status_cache(cache)
 
     # Send alerts if any
     if alerts:
