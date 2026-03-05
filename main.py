@@ -307,7 +307,7 @@ def run_exception_check(external_cache=None):
         return
 
     logger.info("=== EXCEPTION CHECK MODE ===")
-        cache = external_cache if external_cache is not None else load_status_cache()
+    cache = external_cache if external_cache is not None else load_status_cache()            
 
     lark = LarkClient()
     tracker = CarrierTracker()
@@ -430,8 +430,8 @@ def run_exception_check(external_cache=None):
                 time.sleep(0.5)
 
     # Save updated cache
-        if external_cache is None:
-                  save_status_cache(cache)
+    if external_cache is None:
+        save_status_cache(cache)
 
     # Send alerts if any
     if alerts:
