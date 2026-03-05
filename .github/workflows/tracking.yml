@@ -27,6 +27,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Restore status cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/shipment_status_cache.json
+          key: shipment-status-cache-${{ github.run_id }}
+          restore-keys: |
+            shipment-status-cache-
+
       - name: Run full tracking summary (8am and 8pm EST)
         if: github.event.schedule == '0 13 * * *' || github.event.schedule == '0 1 * * *' || github.event_name == 'workflow_dispatch'
         env:
@@ -43,6 +51,7 @@ jobs:
           USPS_CLIENT_ID: ${{ secrets.USPS_CLIENT_ID }}
           USPS_CLIENT_SECRET: ${{ secrets.USPS_CLIENT_SECRET }}
           DHL_API_KEY: ${{ secrets.DHL_API_KEY }}
+          STATUS_CACHE_PATH: /tmp/shipment_status_cache.json
         run: python main.py
 
       - name: Check for shipment exceptions (every hour)
@@ -63,3 +72,10 @@ jobs:
           DHL_API_KEY: ${{ secrets.DHL_API_KEY }}
           STATUS_CACHE_PATH: /tmp/shipment_status_cache.json
         run: python main.py --check-exceptions
+
+      - name: Save status cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/shipment_status_cache.json
+          key: shipment-status-cache-${{ github.run_id }}
