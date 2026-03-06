@@ -28,15 +28,18 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Restore status cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /tmp/shipment_status_cache.json
-          key: shipment-status-cache-${{ github.run_id }}
+          key: shipment-status-cache
           restore-keys: |
-            shipment-status-cache-
+            shipment-status-cache
 
       - name: Run full tracking summary (8am and 8pm EST)
-        if: github.event.schedule == '0 13 * * *' || github.event.schedule == '0 1 * * *' || github.event_name == 'workflow_dispatch'
+        if: >
+          github.event.schedule == '0 13 * * *' ||
+          github.event.schedule == '0 1 * * *' ||
+          github.event_name == 'workflow_dispatch'
         env:
           LARK_APP_ID: ${{ secrets.LARK_APP_ID }}
           LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET }}
@@ -78,4 +81,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/shipment_status_cache.json
-          key: shipment-status-cache-${{ github.run_id }}
+          key: shipment-status-cache
