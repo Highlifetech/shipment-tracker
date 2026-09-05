@@ -100,9 +100,11 @@ def register(app):
                     return jsonify(error='Photo unavailable.'), 403
                 data, mime = store.photo(row)
                 return Response(data, mimetype=mime, headers={'X-Content-Type-Options': 'nosniff'})
-            except Exception:
+            except Exception as exc:
                 # No raw token/API payloads, app-token retry, shared cache or stale fallback.
-                return jsonify(error='Lark could not verify access. Check the app’s user authorization scopes and Base access.'), 403
+                code = getattr(exc, 'code', None)
+                app.logger.warning('Delegated Base read failed: %s code=%s', type(exc).__name__, code)
+                return jsonify(error='Lark could not verify access. Check the app’s user authorization scopes and Base access.', lark_code=code), 403
         return jsonify(error='This action requires verified shipment and export permissions. It is not enabled yet.'), 403
 
     @app.after_request
