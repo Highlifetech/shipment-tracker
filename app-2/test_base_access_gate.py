@@ -22,7 +22,7 @@ class GateTests(unittest.TestCase):
                     if path.startswith('/api'):
                         self.assertEqual(result.json['code'], 'BASE_PERMISSION_VERIFICATION_UNAVAILABLE')
                     else:
-                        self.assertIn(b'Access setup required', result.data)
+                        self.assertIn(b'Access paused', result.data)
                         self.assertNotIn(b'trackingKpis', result.data)
 
     def test_health_and_lark_callback_not_intercepted(self):
