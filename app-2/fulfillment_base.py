@@ -57,7 +57,9 @@ class BaseStore:
         except (requests.RequestException, ValueError) as exc:
             raise BaseError("Lark request failed; check connectivity and app permissions") from exc
         if payload.get("code") != 0:
-            raise BaseError("Lark API error %s; check Base access and field mapping" % payload.get("code"))
+            error = BaseError("Lark API error %s; check Base access and field mapping" % payload.get("code"))
+            error.code = payload.get('code')
+            raise error
         return payload.get("data", {})
 
     def pages(self, path):

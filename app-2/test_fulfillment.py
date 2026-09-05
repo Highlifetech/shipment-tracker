@@ -296,28 +296,17 @@ class FulfillmentTests(unittest.TestCase):
         client = app.test_client()
         self.assertEqual(client.get('/api/fulfillment/photo?key=attacker-token').status_code, 404)
 
-    def test_primary_layout_preserves_legacy_routes(self):
+    def test_primary_layout_requires_user_and_blocks_legacy(self):
         import dashboard
         from types import SimpleNamespace
         app = Flask(__name__)
         chat = SimpleNamespace(_SNAPSHOT={'results': [], 'ts': 0}, update_snapshot=lambda results: None)
         dashboard.register(app, chat, lambda **kwargs: [], None, fulfillment_service=self.svc)
         client = app.test_client()
-        with patch.object(dashboard, 'DASHBOARD_TOKEN', 'test'), patch.object(dashboard.lark_auth, 'configured', return_value=False), patch.dict('os.environ', {'SHIPPING_LAYOUT': 'new'}):
-            headers = {'X-Dashboard-Token': 'test'}
-            primary = client.get('/dashboard', headers=headers)
-            self.assertEqual(primary.status_code, 200)
-            self.assertIn(b'id="overviewPage"', primary.data)
-            legacy = client.get('/dashboard/legacy', headers=headers)
-            self.assertEqual(legacy.status_code, 200)
-            self.assertIn(b'id="mk-open"', legacy.data)
-            self.assertEqual(legacy.data.count(b'/dashboard(?:\\/legacy)?'), 2)
-            old_notification = client.get('/dashboard?status=in_transit', headers=headers)
-            self.assertIn(b'id="mk-open"', old_notification.data)
-            with patch.dict('os.environ', {'SHIPPING_LAYOUT': 'legacy'}):
-                self.assertIn(b'id="mk-open"', client.get('/dashboard', headers=headers).data)
+        with patch('base_access_gate.lark_auth.delegated_token', return_value='user'):
+            self.assertEqual(client.get('/dashboard').status_code, 200)
             self.assertEqual(client.get('/dashboard/legacy').status_code, 403)
-
+            self.assertIn(b'id="overviewPage"', client.get('/dashboard?status=in_transit').data)
 
 if __name__ == '__main__':
     unittest.main()

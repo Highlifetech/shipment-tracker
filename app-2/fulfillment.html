@@ -63,7 +63,7 @@ function ask(message, tracking=null){$('confirmMessage').textContent=message;$('
 async function api(path, data){
  const response=await fetch(path,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-Fulfillment-Request':'1',...(token?{'X-Dashboard-Token':token}:{})},...(data===undefined?{}:{body:JSON.stringify(data)})});
  let result; try{result=await response.json();}catch{throw new Error(response.status===403?'Please reopen the app from Lark to sign in.':'The server could not complete the request.');}
- if(result.code==='BASE_PERMISSION_VERIFICATION_UNAVAILABLE'){document.querySelector('main').replaceChildren();location.replace('/dashboard');throw new Error('Access setup required');}if(!response.ok)throw new Error(result.error||'Request failed'); return result;
+ if(result.code==='LARK_SIGN_IN_REQUIRED'){location.replace('/dashboard');throw new Error('Sign in through Lark');}if(!response.ok)throw new Error(result.error||'Request failed'); return result;
 }
 const avail=item=>route==='us_to_customer'?item.us_available:item.china_available;
 const norm=value=>String(value||'').toLowerCase().trim().replace(/\s+/g,' ');

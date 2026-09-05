@@ -37,6 +37,8 @@ import hmac
 import base64
 import hashlib
 import logging
+import secrets
+import threading
 from urllib.parse import urlencode
 
 import requests
@@ -55,7 +57,20 @@ AUTHORIZE_URL = os.environ.get(
     "https://accounts.larksuite.com/open-apis/authen/v1/authorize")
 
 # Name and open_id. Anything more is not needed to stamp a row.
-SCOPE = os.environ.get("LARK_SSO_SCOPE", "contact:contact.base:readonly")
+SCOPE = os.environ.get("LARK_SSO_SCOPE", "contact:contact.base:readonly base:record:read base:field:read docs:document.media:download")
+
+# Tokens remain server-side, never in the signed (readable) browser cookie.
+# Single-worker deployment: restart/expiry deliberately requires a new login.
+_delegated = {}
+_delegated_lock = threading.Lock()
+
+
+def delegated_token(user):
+    with _delegated_lock:
+        entry = _delegated.get((user or {}).get('grant_id'))
+        if entry and entry['expires'] > time.time() and entry['open_id'] == user.get('open_id'):
+            return entry['token']
+    return None
 
 SESSION_COOKIE = "shipbot_session"
 SESSION_TTL = int(os.environ.get("LARK_SESSION_TTL", str(14 * 24 * 3600)))
@@ -183,4 +198,14 @@ def user_info(user_access_token):
 
 def sign_in(code, redirect_uri):
     """Code from the callback -> the user dict to put in the session."""
-    return user_info(exchange_code(code, redirect_uri))
+    token = exchange_code(code, redirect_uri)
+    user = user_info(token)
+    if not user.get('open_id'):
+        raise ValueError('Lark identity unavailable')
+    grant = secrets.token_urlsafe(32)
+    with _delegated_lock:
+        for key in list(_delegated):
+            if _delegated[key]['expires'] <= time.time():
+                del _delegated[key]
+        _delegated[grant] = {'token': token, 'open_id': user['open_id'], 'expires': time.time() + 1800}
+    return dict(user, grant_id=grant)

@@ -1,40 +1,113 @@
-"""Fail-closed shipping access while delegated Base authorization is unavailable.
+"""Per-user Base reads. Shared-token, legacy, export and mutation paths fail closed."""
+import json
+import os
+import secrets
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from flask import jsonify, request, Response, redirect
+import lark_auth
+from fulfillment_base import BaseStore, BaseError
+from fulfillment import inventory
 
-An identity cookie or shared dashboard token is NOT a record permission grant.
-Do not remove this gate until record, field, attachment and export permissions
-are verified server-side with the acting user's Lark authorization. Legacy
-shipping sheets cannot be treated as an authorized fallback for Base records.
-"""
-from flask import jsonify, request, Response
 
-LOCKED_PAGE = '''<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Shipping · Access setup</title>
-<style>*{box-sizing:border-box}body{margin:0;background:#f6f7fa;color:#1d2940;font:15px system-ui,-apple-system,sans-serif}header{padding:24px max(24px,5vw);background:white;border-bottom:1px solid #e3e7ee;font-size:20px;font-weight:650}header span{font-size:12px;color:#69768b;display:block;margin-bottom:4px;letter-spacing:.08em}main{max-width:560px;margin:10vh auto;padding:0 24px}.card{background:white;padding:36px;border:1px solid #e3e7ee;border-radius:16px;box-shadow:0 8px 30px #17213a06}.badge{display:inline-block;padding:6px 10px;background:#eef2ff;color:#3654be;border-radius:6px;font-size:12px;font-weight:600}h1{font-size:26px;letter-spacing:-.6px;margin:20px 0 12px}p{color:#5e6b80;line-height:1.65;margin:0 0 24px}a{display:inline-block;background:#355bea;color:white;padding:12px 18px;border-radius:8px;text-decoration:none;font-weight:600}a:focus-visible{outline:3px solid #8299ff;outline-offset:4px}.note{font-size:12px;margin:18px 0 0;color:#68768a}</style></head>
-<body><header>Shipping</header><main><section class="card"><h1>Access paused</h1><p>Lark permissions setup is required.</p><a href="https://off-menu.jp.larksuite.com/base/VcAlbwImaab1KlsFLBVjunTNp1c" rel="noreferrer">Open Lark ↗</a></section></main></body></html>'''
+class UserClient:
+    def __init__(self, token):
+        self.token = token
+        self.base_url = lark_auth.BASE_URL
+    def _headers(self):
+        return {'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json'}
+
+
+def read_user_rows(token, settings):
+    # Never derive readable fields or rows from the shared app snapshot.
+    sources = settings.get('sources', [])
+    def read(source):
+        try:
+            return BaseStore(UserClient(token), dict(settings, sources=[source], catalog_only=True)).source_rows()
+        except BaseError as exc:
+            # Explicit Base permission denial: that table contributes no records.
+            # Other errors abort the response rather than falsely claiming a full sync.
+            if getattr(exc, 'code', None) in (91403, 1254302):
+                return []
+            raise
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        return [row for batch in pool.map(read, sources) for row in batch]
 
 
 def register(app):
     @app.before_request
     def require_verified_base_access():
         path = request.path
+        user = lark_auth.read_session(request.cookies.get(lark_auth.SESSION_COOKIE))
+        token = lark_auth.delegated_token(user)
         if path == '/dashboard/health':
-            return jsonify(ok=True, access='locked'), 200, {'Cache-Control': 'no-store'}
-        protected = (path == '/dashboard' or path.startswith('/dashboard/')
-                     or path == '/fulfillment' or path.startswith('/fulfillment/')
-                     or path == '/packing-list' or path.startswith('/packing-list/')
-                     or path == '/api' or path.startswith('/api/'))
+            return jsonify(ok=True), 200, {'Cache-Control': 'no-store'}
+        if path == '/auth/lark/callback':
+            expected = request.cookies.get('shipbot_oauth_state', '')
+            given = request.args.get('state', '')
+            if not expected or not secrets.compare_digest(expected, given):
+                return jsonify(error='Sign-in expired. Reopen the shipping app.'), 403
+            return None
+        shell = path in ('/dashboard', '/fulfillment')
+        api = path == '/api' or path.startswith('/api/')
+        protected = shell or api or path.startswith('/dashboard/') or path.startswith('/fulfillment/') or path.startswith('/packing-list')
         if not protected:
             return None
-        # There is intentionally no environment flag, shared-token exception,
-        # owner-based approximation, or app-token fallback that bypasses this.
-        response = jsonify(
-            error='Shipping access is temporarily locked. Your existing Lark Base '
-                  'Advanced Permissions cannot yet be verified by this app. '
-                  'Use Lark Base directly until delegated authorization is connected.',
-            code='BASE_PERMISSION_VERIFICATION_UNAVAILABLE')
-        if not path.startswith('/api'):
-            response = Response(LOCKED_PAGE, mimetype='text/html')
-        response.status_code = 403
-        response.headers['Cache-Control'] = 'no-store, private'
-        response.headers['Vary'] = 'Cookie, Authorization'
+        if shell:
+            if not token:
+                if not lark_auth.configured():
+                    return jsonify(error='Lark sign-in needs administrator setup.'), 503
+                public = os.environ.get('DASHBOARD_URL', request.host_url).rstrip('/')
+                if public.endswith('/dashboard'):
+                    public = public[:-10]
+                state = secrets.token_urlsafe(32)
+                response = redirect(lark_auth.login_url(public + '/auth/lark/callback', state))
+                response.set_cookie('shipbot_oauth_state', state, max_age=600, secure=True, httponly=True, samesite='Lax')
+                return response
+            from fulfillment_web import page_html
+            return Response(page_html(), mimetype='text/html')
+        if not token:
+            return jsonify(error='Sign in through Lark to load your orders.', code='LARK_SIGN_IN_REQUIRED'), 401
+        if path == '/api/me':
+            return jsonify(name=user.get('name'), open_id=user.get('open_id'))
+        if path == '/api/shipping-workspace/tracking' and request.method == 'GET':
+            # Legacy rows have no verified Base record/field linkage. Never expose them.
+            return jsonify(data={'shipments': []}, sync={'last_synced': None, 'error': 'Legacy tracking is unavailable under Base permissions.'})
+        if path == '/api/fulfillment/sync' and request.method == 'POST':
+            return jsonify(queued=True)
+        if path in ('/api/fulfillment/catalog', '/api/fulfillment/photo') and request.method == 'GET':
+            try:
+                settings = json.loads(os.environ.get('FULFILLMENT_CONFIG', '{}'))
+                if not settings.get('base_token'):
+                    return jsonify(error='Production Base connection is unavailable.'), 503
+                if path.endswith('/catalog'):
+                    rows = read_user_rows(token, settings)
+                    return jsonify(items=inventory(rows, []), shipments=[], can_save=False,
+                                   catalog_only=True, warehouse_address='', demo=False,
+                                   synced_at=datetime.now(timezone.utc).isoformat(), sync={'error': None})
+                if request.args.get('shipment'):
+                    return jsonify(error='Saved packing-list access is not enabled.'), 403
+                key = request.args.get('key', '')
+                table, record = key.split(':', 1)
+                source = next((s for s in settings['sources'] if s['table_id'] == table), None)
+                if not source:
+                    return jsonify(error='Photo unavailable.'), 403
+                store = BaseStore(UserClient(token), dict(settings, sources=[source], catalog_only=True))
+                from fulfillment_base import ident
+                store.records = lambda t: [store.api('GET', store.root + '/tables/' + ident(t) + '/records/' + ident(record))['record']]
+                row = next((r for r in store.source_rows() if r['key'] == key), None)
+                if not row:
+                    return jsonify(error='Photo unavailable.'), 403
+                data, mime = store.photo(row)
+                return Response(data, mimetype=mime, headers={'X-Content-Type-Options': 'nosniff'})
+            except Exception:
+                # No raw token/API payloads, app-token retry, shared cache or stale fallback.
+                return jsonify(error='Lark could not verify access. Check the app’s user authorization scopes and Base access.'), 403
+        return jsonify(error='This action requires verified shipment and export permissions. It is not enabled yet.'), 403
+
+    @app.after_request
+    def private_responses(response):
+        if request.path.startswith(('/api', '/dashboard', '/fulfillment', '/packing-list', '/auth/')):
+            response.headers['Cache-Control'] = 'no-store, private'
+            response.headers['Vary'] = 'Cookie, Authorization'
         return response
