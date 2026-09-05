@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 from flask import Flask
-from base_access_gate import register
+from base_access_gate import register, imported_shipments
 import lark_auth
 
 
@@ -49,6 +49,25 @@ class GateTests(unittest.TestCase):
         self.assertNotIn('secret-user-token', str(user))
         self.assertEqual(lark_auth.delegated_token(user), 'secret-user-token')
         self.assertIsNone(lark_auth.delegated_token(dict(user, open_id='B')))
+
+    def test_backfill_is_stable_and_does_not_change_order_balance(self):
+        item = {'key':'tblA:rec1', 'table_id':'tblA', 'record_id':'rec1',
+                'order':'SO-1', 'customer':'Client', 'product':'Hat',
+                'address':'US warehouse', 'source':'Production', 'source_url':'https://example.com',
+                'photos':[], 'photo_field_id':'', 'ordered_quantity':10,
+                'quantity_shipped':4, 'tracking':'TRACK123', 'carrier':'DHL',
+                'method':'DDP Air', 'date_shipped':'2026-09-01',
+                'china_available':0, 'us_available':0, 'issues':[]}
+        first = imported_shipments([item])
+        second = imported_shipments([item])
+        self.assertEqual(first[0]['submission_id'], second[0]['submission_id'])
+        self.assertEqual(first[0]['units'], 4)
+        self.assertEqual(first[0]['tracking'], 'TRACK123')
+        self.assertTrue(first[0]['imported'])
+        self.assertEqual(item['quantity_shipped'], 4)
+
+    def test_backfill_skips_unshipped_cards(self):
+        self.assertEqual(imported_shipments([{'quantity_shipped':0}]), [])
 
 
 if __name__ == '__main__':

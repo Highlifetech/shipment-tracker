@@ -2,12 +2,14 @@
 import json
 import os
 import secrets
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from flask import jsonify, request, Response, redirect
 import lark_auth
 from fulfillment_base import BaseStore, BaseError
 from fulfillment import inventory
+from fulfillment_base import text
 
 
 class UserClient:
@@ -32,6 +34,35 @@ def read_user_rows(token, settings):
             raise
     with ThreadPoolExecutor(max_workers=3) as pool:
         return [row for batch in pool.map(read, sources) for row in batch]
+
+
+def imported_shipments(items):
+    """Permission-filtered historical shipment snapshots from production cards.
+
+    These are display/backfill records only. They never participate in the app's
+    stock ledger, so Quantity Shipped cannot be counted a second time.
+    """
+    result = []
+    for item in items:
+        qty = item.get('quantity_shipped')
+        if not isinstance(qty, int) or qty <= 0:
+            continue
+        submission = str(uuid.uuid5(uuid.NAMESPACE_URL, 'off-menu:lark-shipped:' + item['key']))
+        tracking, carrier, method = (text(item.get(k)) for k in ('tracking', 'carrier', 'method'))
+        result.append({
+            'schema': 1, 'submission_id': submission,
+            'shipment_id': 'LARK-' + item['record_id'][-8:].upper(),
+            'request_hash': '', 'status': 'Shipped', 'route': 'china_to_us',
+            'batch_ref': item['order'], 'address': item.get('address', ''),
+            'carrier': carrier, 'tracking': tracking, 'box_count': 1,
+            'boxes': [{'box': 1, 'carrier': carrier, 'method': method, 'tracking': tracking}],
+            'lines': [dict(item, qty=qty, box=1)], 'extras': [], 'units': qty,
+            'created_at': item.get('date_shipped') or '', 'created_by': 'Imported from Production Base',
+            'notes': '', 'history': [{'status': 'Imported', 'at': item.get('date_shipped') or '',
+                                      'by': 'Production Base'}],
+            'imported': True, 'source_key': item['key'], 'lark_url': item.get('source_url', '')
+        })
+    return result
 
 
 def register(app):
@@ -82,7 +113,9 @@ def register(app):
                     return jsonify(error='Production Base connection is unavailable.'), 503
                 if path.endswith('/catalog'):
                     rows = read_user_rows(token, settings)
-                    return jsonify(items=inventory(rows, []), shipments=[], can_save=False,
+                    items = inventory(rows, [])
+                    return jsonify(items=items, shipments=imported_shipments(items), can_save=False,
+                                   can_edit_imports=False,
                                    catalog_only=True, warehouse_address='', demo=False,
                                    synced_at=datetime.now(timezone.utc).isoformat(), sync={'error': None})
                 if request.args.get('shipment'):

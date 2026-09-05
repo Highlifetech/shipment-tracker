@@ -58,7 +58,8 @@ def inventory(rows, shipments):
                 received[line["key"]] += line["qty"]
     items = []
     for row in rows:
-        item = {k: text(row.get(k)) for k in ("order", "customer", "product", "address", "source")}
+        item = {k: text(row.get(k)) for k in ("order", "customer", "product", "address", "source",
+                                               "tracking", "carrier", "method", "date_shipped")}
         for quantity in ('ordered_quantity', 'quantity_shipped'):
             try:
                 item[quantity] = integer(row.get(quantity), quantity)

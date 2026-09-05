@@ -122,6 +122,10 @@ class BaseStore:
                     continue
                 row['ordered_quantity'] = values.get(mapping.get('ordered_quantity', 'Quantity'))
                 row['quantity_shipped'] = values.get(mapping.get('quantity_shipped', 'Quantity Shipped'))
+                row['tracking'] = values.get(mapping.get('tracking', 'Tracking Number'))
+                row['carrier'] = values.get(mapping.get('carrier', 'Carrier'))
+                row['method'] = values.get(mapping.get('method', 'Shipment Method'))
+                row['date_shipped'] = values.get(mapping.get('date_shipped', 'Date Shipped'))
                 row.update(key=table + ":" + record["record_id"], table_id=table,
                            record_id=record["record_id"], source=source["name"],
                            source_url=self.record_link(table, record["record_id"]))
@@ -168,7 +172,12 @@ class BaseStore:
                     assert type(line["qty"]) is int and line["qty"] > 0
                     assert type(line["box"]) is int and 1 <= line["box"] <= doc["box_count"]
                     assert line["key"] == line["table_id"] + ":" + line["record_id"]
-                assert doc["units"] == sum(line["qty"] for line in doc["lines"])
+                assert isinstance(doc.get("extras", []), list)
+                for extra in doc.get("extras", []):
+                    assert type(extra["qty"]) is int and extra["qty"] > 0
+                    assert type(extra["box"]) is int and 1 <= extra["box"] <= doc["box_count"]
+                    assert isinstance(extra["description"], str) and extra["description"]
+                assert doc["units"] == sum(line["qty"] for line in doc["lines"]) + sum(extra["qty"] for extra in doc.get("extras", []))
             except (ValueError, TypeError, KeyError, AssertionError) as exc:
                 raise BaseError("Shipment data is inconsistent. Resolve it before packing more orders.") from exc
             seen.add(doc["submission_id"])
@@ -186,6 +195,10 @@ class BaseStore:
         summary = "\n".join("Box %s · %s · %s · %s × %s" %
                             (l["box"], l["customer"], l["order"], l["product"], l["qty"])
                             for l in doc["lines"])
+        if doc.get("extras"):
+            summary += ("\n" if summary else "") + "\n".join(
+                "Box %s · Extra item · %s × %s" % (x["box"], x["description"], x["qty"])
+                for x in doc["extras"])
         return {"Shipment ID": doc["shipment_id"], "Submission ID": doc["submission_id"],
                 "Request Hash": doc["request_hash"], "Status": doc["status"],
                 "Route": doc["route"], "Destination": doc["address"],
