@@ -57,7 +57,7 @@ AUTHORIZE_URL = os.environ.get(
     "https://accounts.larksuite.com/open-apis/authen/v1/authorize")
 
 # Name and open_id. Anything more is not needed to stamp a row.
-SCOPE = os.environ.get("LARK_SSO_SCOPE", "contact:contact.base:readonly base:record:read base:field:read docs:document.media:download")
+SCOPE = os.environ.get("LARK_SSO_SCOPE", "contact:contact.base:readonly base:record:read base:record:retrieve base:field:read docs:document.media:download")
 
 # Tokens remain server-side, never in the signed (readable) browser cookie.
 # Single-worker deployment: restart/expiry deliberately requires a new login.
