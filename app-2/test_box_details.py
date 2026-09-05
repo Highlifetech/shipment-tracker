@@ -23,3 +23,15 @@ class BoxDetailsTests(unittest.TestCase):
         p['boxes'] = [dict(box=1), dict(box=1)]
         with self.assertRaises(Problem):
             build_manifest(p, inventory(rows(), []), {}, 'Test')
+
+    def test_extra_item_prints_without_changing_order_lines(self):
+        p = payload()
+        p['address'] = 'US warehouse'
+        p['extras'] = [dict(box=1, description='Spare hangtags', qty=12)]
+        doc = build_manifest(p, inventory(rows(), []), {}, 'Test')
+        self.assertEqual(len(doc['lines']), len(p['lines']))
+        self.assertEqual(doc['extras'][0]['description'], 'Spare hangtags')
+        self.assertEqual(doc['units'], sum(line['qty'] for line in doc['lines']) + 12)
+        html = packing_html(doc)
+        self.assertIn('Spare hangtags', html)
+        self.assertIn('Not linked to a sales order', html)

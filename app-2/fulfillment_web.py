@@ -42,19 +42,23 @@ def packing_html(doc, photo_prefix="/api/fulfillment/photo?key=", saved=False):
     parts.append('<div class="summary"><span><b>%s</b> cartons</span><span><b>%s</b> units</span><span>%s · %s</span></div>' %
                  (doc["box_count"], doc["units"], esc(doc.get("carrier") or "Carrier pending"), esc(doc.get("tracking") or "Tracking pending")))
     parts.append('<p>%s</p>' % esc(doc.get("notes", "")))
-    def table(lines):
+    def table(lines, extras=()):
         result = ['<table><thead><tr><th>Photo</th><th>Order / customer</th><th>Item</th><th>Box</th><th>Quantity</th></tr></thead><tbody>']
         for line in lines:
             result.append('<tr><td>%s</td><td><a href="%s">%s</a><br><small>%s</small></td><td>%s</td><td>%s</td><td><b>%s</b></td></tr>' %
                           (photo(line), source(line), esc(line["order"]), esc(line["customer"]), esc(line["product"]), line["box"], line["qty"]))
+        for extra in extras:
+            result.append('<tr><td><span>No photo</span></td><td><b>Extra item</b><br><small>Not linked to a sales order</small></td><td>%s</td><td>%s</td><td><b>%s</b></td></tr>' %
+                          (esc(extra["description"]), extra["box"], extra["qty"]))
         return "".join(result) + '</tbody></table>'
-    parts.append('<h2>Shipment summary / 装箱汇总</h2>' + table(doc["lines"]))
+    parts.append('<h2>Shipment summary / 装箱汇总</h2>' + table(doc["lines"], doc.get("extras", [])))
     for box in range(1, doc["box_count"] + 1):
         lines = [l for l in doc["lines"] if l["box"] == box]
+        extras = [x for x in doc.get("extras", []) if x["box"] == box]
         details = next((b for b in doc.get("boxes", []) if b["box"] == box), doc)
         shipping = " · ".join(details.get(k, "") for k in ("carrier", "method", "tracking") if details.get(k))
         parts.append('<section class="box"><small>OFF MENU · %s</small><h1>Box %s of %s</h1><address>%s</address><p>%s units · %s</p>%s</section>' %
-                     (esc(doc["shipment_id"]), box, doc["box_count"], esc(doc["address"]), sum(l["qty"] for l in lines), esc(shipping), table(lines)))
+                     (esc(doc["shipment_id"]), box, doc["box_count"], esc(doc["address"]), sum(l["qty"] for l in lines) + sum(x["qty"] for x in extras), esc(shipping), table(lines, extras)))
     return "".join(parts) + '</body></html>'
 
 

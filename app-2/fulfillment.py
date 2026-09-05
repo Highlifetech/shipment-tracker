@@ -129,7 +129,21 @@ def build_manifest(payload, items, settings, actor):
         if qty > by_key[key][availability]:
             raise Problem("%s: %s selected, only %s available. Refresh and adjust." %
                           (by_key[key]["order"], qty, by_key[key][availability]))
-    if {l["box"] for l in lines} != set(range(1, box_count + 1)):
+    extras = payload.get("extras", [])
+    if not isinstance(extras, list) or len(extras) > 100:
+        raise Problem("Provide no more than 100 extra item lines")
+    clean_extras = []
+    for extra in extras:
+        if not isinstance(extra, dict):
+            raise Problem("Invalid extra item")
+        description = text(extra.get("description"))
+        if not description or len(description) > 200:
+            raise Problem("Extra item description must be 1–200 characters")
+        clean_extras.append(dict(
+            description=description,
+            qty=integer(extra.get("qty"), "Extra item quantity", 1),
+            box=integer(extra.get("box"), "Extra item box", 1, box_count)))
+    if {l["box"] for l in lines}.union(x["box"] for x in clean_extras) != set(range(1, box_count + 1)):
         raise Problem("Every box must contain at least one item")
     override = text(payload.get("address"))
     if len(override) > 2000:
@@ -181,7 +195,8 @@ def build_manifest(payload, items, settings, actor):
             "batch_ref": text(payload.get("batch_ref"))[:100],
             "address": address, "carrier": carrier, "tracking": tracking,
             "box_count": box_count, "boxes": clean_boxes, "lines": sorted(lines, key=lambda l: (l["box"], l["order"], l["product"])),
-            "units": sum(totals.values()), "created_at": now, "created_by": actor,
+            "extras": sorted(clean_extras, key=lambda x: (x["box"], x["description"])),
+            "units": sum(totals.values()) + sum(x["qty"] for x in clean_extras), "created_at": now, "created_by": actor,
             "notes": text(payload.get("notes"))[:2000],
             "history": [{"status": "Packed", "at": now, "by": actor}]}
 
