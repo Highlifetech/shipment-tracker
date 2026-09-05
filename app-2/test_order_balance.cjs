@@ -1,0 +1,14 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const html=fs.readFileSync(__dirname+'/fulfillment.html','utf8');
+const context={route:'china_to_us',avail:i=>i.us_available};vm.createContext(context);
+vm.runInContext(html.slice(html.indexOf('function orderBalance('),html.indexOf('function dirty(')),context);
+const balance=(ordered,shipped)=>context.orderBalance({ordered_quantity:ordered,quantity_shipped:shipped,issues:['Unverified opening stock']});
+assert.equal(balance(3,3).value,0);
+assert.equal(balance(10,3).value,7);
+assert.equal(balance(10,0).value,10);
+assert.equal(balance(10,null).value,'—');
+assert.equal(balance(null,3).value,'—');
+assert.equal(balance(3,4).label,'Shipped exceeds ordered');
+context.route='us_to_customer';
+assert.equal(context.orderBalance({ordered_quantity:3,quantity_shipped:3,issues:['Unverified'],us_available:0}).label,'US stock unverified');
+console.log('Order balance summary tests passed.');
