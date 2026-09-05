@@ -51,8 +51,10 @@ def packing_html(doc, photo_prefix="/api/fulfillment/photo?key=", saved=False):
     parts.append('<h2>Shipment summary / 装箱汇总</h2>' + table(doc["lines"]))
     for box in range(1, doc["box_count"] + 1):
         lines = [l for l in doc["lines"] if l["box"] == box]
+        details = next((b for b in doc.get("boxes", []) if b["box"] == box), doc)
+        shipping = " · ".join(details.get(k, "") for k in ("carrier", "method", "tracking") if details.get(k))
         parts.append('<section class="box"><small>OFF MENU · %s</small><h1>Box %s of %s</h1><address>%s</address><p>%s units · %s</p>%s</section>' %
-                     (esc(doc["shipment_id"]), box, doc["box_count"], esc(doc["address"]), sum(l["qty"] for l in lines), esc(doc.get("tracking", "")), table(lines)))
+                     (esc(doc["shipment_id"]), box, doc["box_count"], esc(doc["address"]), sum(l["qty"] for l in lines), esc(shipping), table(lines)))
     return "".join(parts) + '</body></html>'
 
 

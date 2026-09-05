@@ -131,7 +131,14 @@ def build_manifest(payload, items, settings, actor):
                           (by_key[key]["order"], qty, by_key[key][availability]))
     if {l["box"] for l in lines} != set(range(1, box_count + 1)):
         raise Problem("Every box must contain at least one item")
-    if route == "china_to_us":
+    override = text(payload.get("address"))
+    if len(override) > 2000:
+        raise Problem("Shipping address is too long")
+    if override:
+        if route != "china_to_us" and len({address_key(l["customer"]) for l in lines}) != 1:
+            raise Problem("Customer shipments must contain only one customer")
+        address = override
+    elif route == "china_to_us":
         address = text(settings.get("warehouse_address"))
         if not address:
             raise Problem("Configure the verified US receiving address first")
@@ -147,13 +154,33 @@ def build_manifest(payload, items, settings, actor):
         raise Problem("Choose a supported carrier")
     if tracking and not re.fullmatch(r"[A-Za-z0-9 -]{5,80}", tracking):
         raise Problem("Check the tracking number")
+    box_details = payload.get("boxes")
+    if box_details is None:
+        box_details = [{"box": n, "carrier": carrier, "tracking": tracking, "method": ""} for n in range(1, box_count + 1)]
+    if not isinstance(box_details, list) or len(box_details) != box_count:
+        raise Problem("Provide carrier details for every box")
+    clean_boxes = []
+    for b in box_details:
+        if not isinstance(b, dict):
+            raise Problem("Invalid box details")
+        number = integer(b.get("box"), "Box number", 1, box_count)
+        bc, bt, method = text(b.get("carrier")), text(b.get("tracking")), text(b.get("method"))
+        if bc and bc not in ("UPS", "FedEx", "DHL", "Other"):
+            raise Problem("Choose a supported carrier")
+        if bt and (not bc or not re.fullmatch(r"[A-Za-z0-9 -]{5,80}", bt)):
+            raise Problem("Check the box carrier and tracking number")
+        if len(method) > 100:
+            raise Problem("Service name is too long")
+        clean_boxes.append(dict(box=number, carrier=bc, tracking=bt, method=method))
+    if {b["box"] for b in clean_boxes} != set(range(1, box_count + 1)):
+        raise Problem("Box numbers must be unique")
     now = datetime.now(timezone.utc).isoformat()
     return {"schema": 1, "submission_id": submission,
             "shipment_id": "SHP-" + submission[:8].upper(),
             "request_hash": digest(payload), "status": "Packed", "route": route,
             "batch_ref": text(payload.get("batch_ref"))[:100],
             "address": address, "carrier": carrier, "tracking": tracking,
-            "box_count": box_count, "lines": sorted(lines, key=lambda l: (l["box"], l["order"], l["product"])),
+            "box_count": box_count, "boxes": clean_boxes, "lines": sorted(lines, key=lambda l: (l["box"], l["order"], l["product"])),
             "units": sum(totals.values()), "created_at": now, "created_by": actor,
             "notes": text(payload.get("notes"))[:2000],
             "history": [{"status": "Packed", "at": now, "by": actor}]}
