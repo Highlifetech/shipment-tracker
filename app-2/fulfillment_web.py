@@ -18,8 +18,9 @@ ROUTES = {"china_to_us": "China â†’ US warehouse", "china_to_customer": "China â
 
 
 def page_html():
+    from logo_data import PNG_B64
     with open(os.path.join(os.path.dirname(__file__), "fulfillment.html"), encoding="utf-8") as f:
-        return f.read()
+        return f.read().replace('__OFF_MENU_LOGO__', 'data:image/png;base64,' + PNG_B64)
 
 
 def packing_html(doc, photo_prefix="/api/fulfillment/photo?key=", saved=False):
