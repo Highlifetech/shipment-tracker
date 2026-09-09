@@ -454,7 +454,7 @@ def shipment_line(r, bucket=None, section=""):
         # Unknown short all-caps codes (EWS, GLS) stay as written.
         pretty = CARRIER_DISPLAY.get(
             carrier, carrier if len(carrier) <= 5 else carrier.title())
-        parts.append("`%s`" % pretty)
+        parts.append("%s" % pretty)
 
     date = _short_date(r.get("delivery_date"))
     if date:
